@@ -35,6 +35,7 @@ type live struct {
 	playbackURL string // 录播链接
 	backupURL   string // 录播备份链接
 	liveCutNum  int    // 直播剪辑编号
+	coverUrl    string // 直播封面
 }
 
 var client = &fasthttp.Client{
@@ -137,6 +138,7 @@ func fetchLiveList() (list map[string]*live, e error) {
 		l.streamName = string(liveRoom.GetStringBytes("streamName"))
 		l.startTime = liveRoom.GetInt64("createTime")
 		l.title = string(liveRoom.GetStringBytes("title"))
+		l.coverUrl = string(liveRoom.GetArray("coverUrls")[0].GetStringBytes())
 		l.duration = 0
 		l.playbackURL = ""
 		l.backupURL = ""
