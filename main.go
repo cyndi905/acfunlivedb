@@ -36,6 +36,8 @@ type live struct {
 	backupURL   string // 录播备份链接
 	liveCutNum  int    // 直播剪辑编号
 	coverUrl    string // 直播封面
+	likeCount   int64  // 点赞数
+	onlineCount int64  // 在线人数
 }
 
 var client = &fasthttp.Client{
@@ -143,6 +145,8 @@ func fetchLiveList() (list map[string]*live, e error) {
 		l.playbackURL = ""
 		l.backupURL = ""
 		l.liveCutNum = 0
+		l.onlineCount = liveRoom.GetInt64("onlineCount")
+		l.likeCount = liveRoom.GetInt64("likeCount")
 		list[l.liveID] = l
 	}
 
@@ -398,6 +402,12 @@ func main() {
 	updateDurationStmt, err = db.PrepareContext(ctx, updateDuration)
 	checkErr(err)
 	defer updateDurationStmt.Close()
+	updateCoverUrlAndLikeCountStmt, err = db.PrepareContext(ctx, updateCoverUrlAndLikeCount)
+	checkErr(err)
+	defer updateCoverUrlAndLikeCountStmt.Close()
+	updateMaxOnlineCountStmt, err = db.PrepareContext(ctx, updateMaxOnlineCount)
+	checkErr(err)
+	defer updateMaxOnlineCountStmt.Close()
 	selectUIDStmt, err = db.PrepareContext(ctx, selectUID)
 	checkErr(err)
 	defer selectUIDStmt.Close()
@@ -446,6 +456,9 @@ Loop:
 						}
 						updateLiveCutNum(ctx, liveID, num)
 					}(l.uid, l.liveID)
+				} else {
+					updateCoverAndLike(ctx, l.liveID, l.coverUrl, l.likeCount)
+					updateMaxOnline(ctx, l.liveID, l.onlineCount)
 				}
 			}
 
