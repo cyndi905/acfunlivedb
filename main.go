@@ -405,6 +405,9 @@ func main() {
 	updateCoverUrlAndLikeCountStmt, err = db.PrepareContext(ctx, updateCoverUrlAndLikeCount)
 	checkErr(err)
 	defer updateCoverUrlAndLikeCountStmt.Close()
+	updateLikeCountStmt, err = db.PrepareContext(ctx, updateLikeCount)
+	checkErr(err)
+	defer updateLikeCountStmt.Close()
 	updateMaxOnlineCountStmt, err = db.PrepareContext(ctx, updateMaxOnlineCount)
 	checkErr(err)
 	defer updateMaxOnlineCountStmt.Close()
@@ -457,7 +460,14 @@ Loop:
 						updateLiveCutNum(ctx, liveID, num)
 					}(l.uid, l.liveID)
 				} else {
-					updateCoverAndLike(ctx, l.liveID, l.coverUrl, l.likeCount)
+					oldLive := oldList[l.liveID]
+					// 确保oldLive不是nil指针
+					if oldLive != nil && (*oldLive).coverUrl == l.coverUrl {
+						updateLike(ctx, l.liveID, l.likeCount)
+					} else {
+						// 封面发生改变时同时更新封面和点赞数
+						updateCoverAndLike(ctx, l.liveID, l.coverUrl, l.likeCount)
+					}
 					updateMaxOnline(ctx, l.liveID, l.onlineCount)
 				}
 			}

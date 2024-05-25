@@ -50,6 +50,7 @@ const (
 	updateDuration             = `UPDATE acfunlive SET duration = ? WHERE liveID = ?;`                                    // 更新直播时长
 	updateCoverUrlAndLikeCount = `UPDATE acfunlive SET coverUrl = ?, likeCount = ? WHERE liveID = ?;`                     // 更新封面和点赞数
 	updateMaxOnlineCount       = `UPDATE acfunlive SET maxOnlineCount = ? WHERE liveID = ? AND ? > maxOnlineCount;`       // 更新最高在线人数
+	updateLikeCount            = `UPDATE acfunlive SET likeCount = ? WHERE liveID = ?;`                                   // 更新点赞数
 )
 
 var (
@@ -61,6 +62,7 @@ var (
 	selectLiveIDStmt               *sql.Stmt
 	updateCoverUrlAndLikeCountStmt *sql.Stmt
 	updateMaxOnlineCountStmt       *sql.Stmt
+	updateLikeCountStmt            *sql.Stmt
 )
 
 // 插入live
@@ -94,6 +96,14 @@ func updateCoverAndLike(ctx context.Context, liveID string, cover string, likeCo
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
 	_, err := updateCoverUrlAndLikeCountStmt.ExecContext(ctx, cover, likeCount, liveID)
+	checkErr(err)
+}
+
+// 更新直播点赞数
+func updateLike(ctx context.Context, liveID string, likeCount int64) {
+	dbMutex.Lock()
+	defer dbMutex.Unlock()
+	_, err := updateLikeCountStmt.ExecContext(ctx, likeCount, liveID)
 	checkErr(err)
 }
 
