@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -262,7 +263,7 @@ func handleQuery(ctx context.Context, uid, count int) {
 
 // 处理输入
 func handleInput(ctx context.Context) {
-	const helpMsg = `请输入"listall 主播的uid"、"list10 主播的uid"、"getplayback liveID"或"quit"`
+	const helpMsg = `请输入"listall 主播的uid"、"list10 主播的uid"、"getplayback liveID"、checkrec或"quit"`
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
@@ -272,51 +273,95 @@ func handleInput(ctx context.Context) {
 			continue
 		}
 		if len(cmd) == 1 {
-			if cmd[0] == "quit" {
+			switch cmd[0] {
+			case "quit":
 				quit <- struct{}{}
 				break
-			}
-			log.Println(helpMsg)
-			continue
-		}
-		switch cmd[0] {
-		case "listall":
-			for _, u := range cmd[1:] {
-				uid, err := strconv.ParseUint(u, 10, 64)
-				if err != nil {
-					log.Println(helpMsg)
-				} else {
-					handleQuery(ctx, int(uid), -1)
-				}
-			}
-		case "list10":
-			for _, u := range cmd[1:] {
-				uid, err := strconv.ParseUint(u, 10, 64)
-				if err != nil {
-					log.Println(helpMsg)
-				} else {
-					handleQuery(ctx, int(uid), 10)
-				}
-			}
-		case "getplayback":
-			log.Println("查询录播链接，请等待")
-			for _, liveID := range cmd[1:] {
-				playback, err := getPlayback(liveID)
+			case "checkrec":
+				log.Println("正在扫描并补全直播信息，请等待")
+				recs, err := queryDurationZero(ctx)
 				if err != nil {
 					log.Println(err)
 				} else {
-					if playback.Duration != 0 {
-						if queryExist(ctx, liveID) {
-							updateLiveDuration(ctx, liveID, playback.Duration)
-						}
+					if len(recs) != 0 {
+						count := 0
+						var mu sync.Mutex
+						go func() {
+							for i, liveID := range recs {
+								// Seed the random number generator
+								r := rand.New(rand.NewSource(time.Now().UnixNano()))
+								// Generate a random number between 5 and 10
+								sleepTime := time.Duration(5+r.Intn(6)) * time.Second
+								time.Sleep(sleepTime)
+								var info *acfundanmu.Playback
+								err = runThrice(func() error {
+									info, err = getPlayback(liveID)
+									return err
+								})
+								if err != nil {
+									log.Printf("Error 3 times getting playback for liveID %s: %v", liveID, err)
+								} else {
+									if info.Duration != 0 {
+										mu.Lock()
+										updateLiveDuration(ctx, liveID, info.Duration)
+										count++
+										mu.Unlock()
+										log.Printf("liveID为 %s 的记录已更新直播时长为：%d，进度: %d/%d", liveID, info.Duration, i+1, len(recs))
+									} else {
+										log.Printf("liveID为 %s 的记录无需更新直播时长，进度: %d/%d", liveID, i+1, len(recs))
+									}
+								}
+							}
+							log.Printf("已为%d条记录更新直播时长", count)
+						}()
+					} else {
+						log.Printf("暂无duration为0的数据")
 					}
-					log.Printf("liveID为 %s 的录播查询结果是：\n录播链接：%s\n录播备份链接：%s",
-						liveID, playback.URL, playback.BackupURL,
-					)
 				}
+			default:
+				log.Println(helpMsg)
+				continue
 			}
-		default:
-			log.Println(helpMsg)
+		} else {
+			switch cmd[0] {
+			case "listall":
+				for _, u := range cmd[1:] {
+					uid, err := strconv.ParseUint(u, 10, 64)
+					if err != nil {
+						log.Println(helpMsg)
+					} else {
+						handleQuery(ctx, int(uid), -1)
+					}
+				}
+			case "list10":
+				for _, u := range cmd[1:] {
+					uid, err := strconv.ParseUint(u, 10, 64)
+					if err != nil {
+						log.Println(helpMsg)
+					} else {
+						handleQuery(ctx, int(uid), 10)
+					}
+				}
+			case "getplayback":
+				log.Println("查询录播链接，请等待")
+				for _, liveID := range cmd[1:] {
+					playback, err := getPlayback(liveID)
+					if err != nil {
+						log.Println(err)
+					} else {
+						if playback.Duration != 0 {
+							if queryExist(ctx, liveID) {
+								updateLiveDuration(ctx, liveID, playback.Duration)
+							}
+						}
+						log.Printf("liveID为 %s 的录播查询结果是：\n录播链接：%s\n录播备份链接：%s",
+							liveID, playback.URL, playback.BackupURL,
+						)
+					}
+				}
+			default:
+				log.Println(helpMsg)
+			}
 		}
 	}
 	err := scanner.Err()
@@ -417,6 +462,9 @@ func main() {
 	selectLiveIDStmt, err = db.PrepareContext(ctx, selectLiveID)
 	checkErr(err)
 	defer selectLiveIDStmt.Close()
+	selectDurationZeroStmt, err = db.PrepareContext(ctx, selectDurationZero)
+	checkErr(err)
+	defer selectDurationZeroStmt.Close()
 
 	ac, err = acfundanmu.NewAcFunLive()
 	checkErr(err)

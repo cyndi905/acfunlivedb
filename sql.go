@@ -51,6 +51,7 @@ const (
 	updateCoverUrlAndLikeCount = `UPDATE acfunlive SET coverUrl = ?, likeCount = ? WHERE liveID = ?;`                     // 更新封面和点赞数
 	updateMaxOnlineCount       = `UPDATE acfunlive SET maxOnlineCount = ? WHERE liveID = ? AND ? > maxOnlineCount;`       // 更新最高在线人数
 	updateLikeCount            = `UPDATE acfunlive SET likeCount = ? WHERE liveID = ?;`                                   // 更新点赞数
+	selectDurationZero         = `SELECT liveId FROM acfunlive WHERE duration = 0;`                                       // 查询duration为0的数据
 )
 
 var (
@@ -63,6 +64,7 @@ var (
 	updateCoverUrlAndLikeCountStmt *sql.Stmt
 	updateMaxOnlineCountStmt       *sql.Stmt
 	updateLikeCountStmt            *sql.Stmt
+	selectDurationZeroStmt         *sql.Stmt
 )
 
 // 插入live
@@ -122,4 +124,27 @@ func queryExist(ctx context.Context, liveID string) bool {
 	var uid int
 	err := selectLiveIDStmt.QueryRowContext(ctx, liveID).Scan(&uid)
 	return err == nil
+}
+
+// 查询所有duration为0的liveId
+func queryDurationZero(ctx context.Context) ([]string, error) {
+	dbMutex.RLock()
+	defer dbMutex.RUnlock()
+	rows, err := selectDurationZeroStmt.QueryContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var liveIds []string
+	var liveId string
+	for rows.Next() {
+		err := rows.Scan(&liveId)
+		if err != nil {
+			return nil, err
+		}
+		liveIds = append(liveIds, liveId)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return liveIds, nil
 }
