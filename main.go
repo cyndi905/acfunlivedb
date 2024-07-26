@@ -46,7 +46,7 @@ var client = &fasthttp.Client{
 	ReadTimeout:         10 * time.Second,
 	WriteTimeout:        10 * time.Second,
 }
-
+var oldList map[string]*live
 var (
 	liveListParserPool fastjson.ParserPool
 	liveCutParserPool  fastjson.ParserPool
@@ -277,6 +277,16 @@ func handleInput(ctx context.Context) {
 			case "quit":
 				quit <- struct{}{}
 				break
+			case "fix":
+				log.Println("正在修复duration信息，请等待")
+				if len(oldList) == 0 {
+					log.Println("目前没有正在直播的，请稍后再尝试")
+				} else {
+					for _, live := range oldList {
+						updateLiveDuration(ctx, live.liveID, 0)
+						log.Printf("已修复liveId为 %s 的duration信息为0", live.liveID)
+					}
+				}
 			case "checkrec":
 				log.Println("正在扫描并补全直播信息，请等待")
 				recs, err := queryDurationZero(ctx)
@@ -294,22 +304,24 @@ func handleInput(ctx context.Context) {
 								sleepTime := time.Duration(5+r.Intn(6)) * time.Second
 								time.Sleep(sleepTime)
 								var info *acfundanmu.Playback
-								err = runThrice(func() error {
+								// 查找，不在直播中才进行获取
+								if _, ok := oldList[liveID]; !ok {
 									info, err = getPlayback(liveID)
-									return err
-								})
-								if err != nil {
-									log.Printf("Error 3 times getting playback for liveID %s: %v", liveID, err)
-								} else {
-									if info.Duration != 0 {
-										mu.Lock()
-										updateLiveDuration(ctx, liveID, info.Duration)
-										count++
-										mu.Unlock()
-										log.Printf("liveID为 %s 的记录已更新直播时长为：%d，进度: %d/%d", liveID, info.Duration, i+1, len(recs))
+									if err != nil {
+										log.Printf("Error getting playback for liveID %s: %v", liveID, err)
 									} else {
-										log.Printf("liveID为 %s 的记录无需更新直播时长，进度: %d/%d", liveID, i+1, len(recs))
+										if info.Duration != 0 {
+											mu.Lock()
+											updateLiveDuration(ctx, liveID, info.Duration)
+											count++
+											mu.Unlock()
+											log.Printf("liveID为 %s 的记录已更新直播时长为：%d，进度: %d/%d", liveID, info.Duration, i+1, len(recs))
+										} else {
+											log.Printf("liveID为 %s 的记录无需更新直播时长，进度: %d/%d", liveID, i+1, len(recs))
+										}
 									}
+								} else {
+									log.Printf("liveID为 %s 的记录还在直播无需更新直播时长，进度: %d/%d", liveID, i+1, len(recs))
 								}
 							}
 							log.Printf("已为%d条记录更新直播时长", count)
@@ -349,6 +361,7 @@ func handleInput(ctx context.Context) {
 					if err != nil {
 						log.Println(err)
 					} else {
+
 						if playback.Duration != 0 {
 							if queryExist(ctx, liveID) {
 								updateLiveDuration(ctx, liveID, playback.Duration)
@@ -470,7 +483,7 @@ func main() {
 	checkErr(err)
 	go handleInput(childCtx)
 
-	oldList := make(map[string]*live)
+	oldList = make(map[string]*live)
 Loop:
 	for {
 		select {
