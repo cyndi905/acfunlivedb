@@ -263,7 +263,7 @@ func handleQuery(ctx context.Context, uid, count int) {
 
 // 处理输入
 func handleInput(ctx context.Context) {
-	const helpMsg = `请输入"listall 主播的uid"、"list10 主播的uid"、"getplayback liveID"、checkrec或"quit"`
+	const helpMsg = `请输入"listall 主播的uid"、"list10 主播的uid"、"getplayback liveID"、“detail liveID”、“checkrec”或"quit"`
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
@@ -370,6 +370,19 @@ func handleInput(ctx context.Context) {
 						log.Printf("liveID为 %s 的录播查询结果是：\n录播链接：%s\n录播备份链接：%s",
 							liveID, playback.URL, playback.BackupURL,
 						)
+					}
+				}
+			case "detail":
+				for _, u := range cmd[1:] {
+					err := runThrice(func() error {
+						summary, err := ac.GetSummary(u)
+						if summary != nil {
+							log.Printf("liveID为 %s 的直播信息：duration:%d，点赞总数:%s，看过人数:%s", u, summary.Duration, summary.LikeCount, summary.WatchCount)
+						}
+						return err
+					})
+					if err != nil {
+						log.Printf(err.Error())
 					}
 				}
 			default:
