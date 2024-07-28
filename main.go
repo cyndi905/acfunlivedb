@@ -297,31 +297,34 @@ func handleInput(ctx context.Context) {
 						count := 0
 						var mu sync.Mutex
 						go func() {
-							for i, liveID := range recs {
+							// 筛选当前不在直播中的记录
+							var liveIDsToUpdate []string
+							for _, liveID := range recs {
+								if _, ok := oldList[liveID]; !ok {
+									liveIDsToUpdate = append(liveIDsToUpdate, liveID)
+								}
+							}
+
+							for i, liveID := range liveIDsToUpdate {
 								// Seed the random number generator
 								r := rand.New(rand.NewSource(time.Now().UnixNano()))
 								// Generate a random number between 5 and 10
 								sleepTime := time.Duration(5+r.Intn(6)) * time.Second
 								time.Sleep(sleepTime)
-								var info *acfundanmu.Playback
-								// 查找，不在直播中才进行获取
-								if _, ok := oldList[liveID]; !ok {
-									info, err = getPlayback(liveID)
-									if err != nil {
-										log.Printf("Error getting playback for liveID %s: %v", liveID, err)
-									} else {
-										if info.Duration != 0 {
-											mu.Lock()
-											updateLiveDuration(ctx, liveID, info.Duration)
-											count++
-											mu.Unlock()
-											log.Printf("liveID为 %s 的记录已更新直播时长为：%d，进度: %d/%d", liveID, info.Duration, i+1, len(recs))
-										} else {
-											log.Printf("liveID为 %s 的记录无需更新直播时长，进度: %d/%d", liveID, i+1, len(recs))
-										}
-									}
+
+								info, err := getPlayback(liveID)
+								if err != nil {
+									log.Printf("Error getting playback for liveID %s: %v", liveID, err)
 								} else {
-									log.Printf("liveID为 %s 的记录还在直播无需更新直播时长，进度: %d/%d", liveID, i+1, len(recs))
+									if info.Duration != 0 {
+										mu.Lock()
+										updateLiveDuration(ctx, liveID, info.Duration)
+										count++
+										mu.Unlock()
+										log.Printf("liveID为 %s 的记录已更新直播时长为：%d，进度: %d/%d", liveID, info.Duration, i+1, len(liveIDsToUpdate))
+									} else {
+										log.Printf("liveID为 %s 的记录无需更新直播时长，进度: %d/%d", liveID, i+1, len(liveIDsToUpdate))
+									}
 								}
 							}
 							log.Printf("已为%d条记录更新直播时长", count)
