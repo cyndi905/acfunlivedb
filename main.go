@@ -64,7 +64,7 @@ var livePool = &sync.Pool{
 // 检查错误
 func checkErr(err error) {
 	if err != nil {
-		panic(err)
+		log.Fatalf("遇到致命错误: %v", err)
 	}
 }
 
@@ -449,6 +449,13 @@ func prepare_table(ctx context.Context) {
 }
 
 func main() {
+	logFile, err := os.OpenFile("error.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("无法打开日志文件: %v", err)
+	}
+	defer logFile.Close()
+	log.SetOutput(logFile)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	childCtx, cancel := context.WithCancel(ctx)
