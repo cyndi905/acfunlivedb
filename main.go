@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"os"
@@ -454,7 +455,9 @@ func main() {
 		log.Fatalf("无法打开日志文件: %v", err)
 	}
 	defer logFile.Close()
-	log.SetOutput(logFile)
+	// 同时将日志输出到文件和控制台
+	multiWriter := io.MultiWriter(os.Stdout, logFile)
+	log.SetOutput(multiWriter)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
