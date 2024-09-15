@@ -264,7 +264,7 @@ func handleQuery(ctx context.Context, uid, count int) {
 
 // 处理输入
 func handleInput(ctx context.Context) {
-	const helpMsg = `请输入"listall 主播的uid"、"list10 主播的uid"、"getplayback liveID"、“detail liveID”、“checkrec”或"quit"`
+	const helpMsg = `请输入"listall 主播的uid"、"list10 主播的uid"、"getplayback liveID"、“detail liveID”、“checkrec”、“scanstreamer”或"quit"`
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
@@ -288,6 +288,9 @@ func handleInput(ctx context.Context) {
 						log.Printf("已修复liveId为 %s 的duration信息为0", live.liveID)
 					}
 				}
+			case "scanstreamer":
+				log.Println("正在扫描并主包，请等待")
+				go scanStreamer(ctx)
 			case "checkrec":
 				log.Println("正在扫描并补全直播信息，请等待")
 				recs, err := queryDurationZero(ctx)
@@ -425,7 +428,7 @@ func getPlayback(liveID string) (playback *acfundanmu.Playback, err error) {
 func prepare_table(ctx context.Context) {
 	// 检查table是否存在
 	row := db.QueryRowContext(ctx, checkTable)
-	var n int
+	var n, n1 int
 	err := row.Scan(&n)
 	checkErr(err)
 	if n == 0 {
@@ -443,9 +446,21 @@ func prepare_table(ctx context.Context) {
 			checkErr(err)
 		}
 	}
+	r := db.QueryRowContext(ctx, checkStreamerTable)
+	err = r.Scan(&n1)
+	checkErr(err)
+	if n1 == 0 {
+		// table不存在
+		_, err = db.ExecContext(ctx, createStreamerTable)
+		checkErr(err)
+	}
 	_, err = db.ExecContext(ctx, createLiveIDIndex)
 	checkErr(err)
 	_, err = db.ExecContext(ctx, createUIDIndex)
+	checkErr(err)
+	_, err = db.ExecContext(ctx, createStreamerUIDIndex)
+	checkErr(err)
+	_, err = db.ExecContext(ctx, createNameIndex)
 	checkErr(err)
 }
 
@@ -504,6 +519,9 @@ func main() {
 	selectDurationZeroStmt, err = db.PrepareContext(ctx, selectDurationZero)
 	checkErr(err)
 	defer selectDurationZeroStmt.Close()
+	scanStreamerStmt, err = db.PrepareContext(ctx, scanStreamerToTable)
+	checkErr(err)
+	defer scanStreamerStmt.Close()
 
 	ac, err = acfundanmu.NewAcFunLive()
 	checkErr(err)

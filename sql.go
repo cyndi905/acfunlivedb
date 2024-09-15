@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"log"
 
 	_ "modernc.org/sqlite"
 )
@@ -25,6 +26,24 @@ const createTable = `CREATE TABLE IF NOT EXISTS acfunlive (
 );
 `
 
+const createStreamerTable = `CREATE TABLE IF NOT EXISTS streamer (
+	uid INTEGER NOT NULL PRIMARY KEY,
+	name TEXT NOT NULL
+)
+`
+
+const scanStreamerToTable = `INSERT INTO streamer (uid, name)
+SELECT uid, name
+FROM acfunlive AS a
+WHERE startTime = (
+    SELECT MAX(startTime)
+    FROM acfunlive AS b
+    WHERE a.uid = b.uid AND a.name = b.name
+)
+ON CONFLICT (uid)
+DO UPDATE SET name = excluded.name
+WHERE streamer.name != excluded.name`
+
 // 插入live
 const insertLive = `INSERT OR IGNORE INTO acfunlive
 (liveID, uid, name, streamName, startTime, title, duration, playbackURL, backupURL, liveCutNum, coverUrl, likeCount, maxOnlineCount)
@@ -43,7 +62,10 @@ const (
 	selectLiveID               = `SELECT uid FROM acfunlive WHERE liveID = ?;`                                            // 根据liveID查询
 	createLiveIDIndex          = `CREATE INDEX IF NOT EXISTS liveIDIndex ON acfunlive (liveID);`                          // 生成liveID的index
 	createUIDIndex             = `CREATE INDEX IF NOT EXISTS uidIndex ON acfunlive (uid);`                                // 生成uid的index
+	createNameIndex            = `CREATE INDEX IF NOT EXISTS nameIndex ON streamer (name);`                               // 生成name的index
+	createStreamerUIDIndex     = `CREATE INDEX IF NOT EXISTS uidIndex ON streamer (uid);`                                 // 生成主播表uid的index
 	checkTable                 = `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='acfunlive';`            // 检查table是否存在
+	checkStreamerTable         = `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='streamer';`             // 检查主播table是否存在
 	checkLiveCutNum            = `SELECT COUNT(*) AS CNTREC FROM pragma_table_info('acfunlive') WHERE name='liveCutNum';` // 检查liveCutNum是否存在
 	insertLiveCutNum           = `ALTER TABLE acfunlive ADD COLUMN liveCutNum INTEGER NOT NULL DEFAULT 0;`                // 插入直播剪辑编号
 	updateLiveCut              = `UPDATE acfunlive SET liveCutNum = ? WHERE liveID = ?;`                                  // 更新直播剪辑编号
@@ -65,6 +87,7 @@ var (
 	updateMaxOnlineCountStmt       *sql.Stmt
 	updateLikeCountStmt            *sql.Stmt
 	selectDurationZeroStmt         *sql.Stmt
+	scanStreamerStmt               *sql.Stmt
 )
 
 // 插入live
@@ -74,6 +97,16 @@ func insert(ctx context.Context, l *live) {
 	_, err := insertStmt.ExecContext(ctx,
 		l.liveID, l.uid, l.name, l.streamName, l.startTime, l.title, l.duration, l.playbackURL, l.backupURL, l.liveCutNum, l.coverUrl, l.likeCount, l.onlineCount,
 	)
+	checkErr(err)
+}
+
+func scanStreamer(ctx context.Context) {
+	dbMutex.Lock()
+	defer dbMutex.Unlock()
+	_, err := scanStreamerStmt.ExecContext(ctx)
+	if err == nil {
+		log.Println("已更新主包表")
+	}
 	checkErr(err)
 }
 
