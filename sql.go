@@ -22,7 +22,8 @@ const createTable = `CREATE TABLE IF NOT EXISTS acfunlive (
 	liveCutNum INTEGER NOT NULL DEFAULT 0,
 	coverUrl TEXT NOT NULL,
 	likeCount INTEGER DEFAULT 0,
-	maxOnlineCount INTEGER DEFAULT 0
+	maxOnlineCount INTEGER DEFAULT 0,
+	isSync INTEGER DEFAULT 0
 );
 `
 
@@ -46,34 +47,36 @@ WHERE streamer.name != excluded.name`
 
 // 插入live
 const insertLive = `INSERT OR IGNORE INTO acfunlive
-(liveID, uid, name, streamName, startTime, title, duration, playbackURL, backupURL, liveCutNum, coverUrl, likeCount, maxOnlineCount)
+(liveID, uid, name, streamName, startTime, title, duration, playbackURL, backupURL, liveCutNum, coverUrl, likeCount, maxOnlineCount,isSync)
 VALUES
-(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,0);
 `
 
 // 根据uid查询
-const selectUID = `SELECT * FROM acfunlive
+const selectUID = `SELECT liveID, uid, name, streamName, startTime, title, duration, playbackURL, backupURL, liveCutNum, coverUrl, likeCount, maxOnlineCount FROM acfunlive
 WHERE uid = ?
 ORDER BY startTime DESC
 LIMIT ?;
 `
 
 const (
-	selectLiveID               = `SELECT uid FROM acfunlive WHERE liveID = ?;`                                            // 根据liveID查询
-	createLiveIDIndex          = `CREATE INDEX IF NOT EXISTS liveIDIndex ON acfunlive (liveID);`                          // 生成liveID的index
-	createUIDIndex             = `CREATE INDEX IF NOT EXISTS uidIndex ON acfunlive (uid);`                                // 生成uid的index
-	createNameIndex            = `CREATE INDEX IF NOT EXISTS nameIndex ON streamer (name);`                               // 生成name的index
-	createStreamerUIDIndex     = `CREATE INDEX IF NOT EXISTS uidIndex ON streamer (uid);`                                 // 生成主播表uid的index
-	checkTable                 = `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='acfunlive';`            // 检查table是否存在
-	checkStreamerTable         = `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='streamer';`             // 检查主播table是否存在
-	checkLiveCutNum            = `SELECT COUNT(*) AS CNTREC FROM pragma_table_info('acfunlive') WHERE name='liveCutNum';` // 检查liveCutNum是否存在
-	insertLiveCutNum           = `ALTER TABLE acfunlive ADD COLUMN liveCutNum INTEGER NOT NULL DEFAULT 0;`                // 插入直播剪辑编号
-	updateLiveCut              = `UPDATE acfunlive SET liveCutNum = ? WHERE liveID = ?;`                                  // 更新直播剪辑编号
-	updateDuration             = `UPDATE acfunlive SET duration = ? WHERE liveID = ?;`                                    // 更新直播时长
-	updateCoverUrlAndLikeCount = `UPDATE acfunlive SET coverUrl = ?, likeCount = ? WHERE liveID = ?;`                     // 更新封面和点赞数
-	updateMaxOnlineCount       = `UPDATE acfunlive SET maxOnlineCount = ? WHERE liveID = ? AND ? > maxOnlineCount;`       // 更新最高在线人数
-	updateLikeCount            = `UPDATE acfunlive SET likeCount = ? WHERE liveID = ?;`                                   // 更新点赞数
-	selectDurationZero         = `SELECT liveId FROM acfunlive WHERE duration = 0;`                                       // 查询duration为0的数据
+	selectLiveID               = `SELECT uid FROM acfunlive WHERE liveID = ?;`                                                 // 根据liveID查询
+	createLiveIDIndex          = `CREATE INDEX IF NOT EXISTS liveIDIndex ON acfunlive (liveID);`                               // 生成liveID的index
+	createUIDIndex             = `CREATE INDEX IF NOT EXISTS uidIndex ON acfunlive (uid);`                                     // 生成uid的index
+	createNameIndex            = `CREATE INDEX IF NOT EXISTS nameIndex ON streamer (name);`                                    // 生成name的index
+	createStreamerUIDIndex     = `CREATE INDEX IF NOT EXISTS uidIndex ON streamer (uid);`                                      // 生成主播表uid的index
+	checkTable                 = `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='acfunlive';`                 // 检查table是否存在
+	checkStreamerTable         = `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='streamer';`                  // 检查主播table是否存在
+	checkLiveCutNum            = `SELECT COUNT(*) AS CNTREC FROM pragma_table_info('acfunlive') WHERE name='liveCutNum';`      // 检查liveCutNum是否存在
+	insertLiveCutNum           = `ALTER TABLE acfunlive ADD COLUMN liveCutNum INTEGER NOT NULL DEFAULT 0;`                     // 插入直播剪辑编号
+	checkIsSync                = `SELECT COUNT(*) AS CNTREC FROM pragma_table_info('acfunlive') WHERE name='isSync';`          // 检查isSync是否存在
+	insertIsSync               = `ALTER TABLE acfunlive ADD COLUMN isSync INTEGER DEFAULT 0;`                                  // 插入记录同步标志
+	updateLiveCut              = `UPDATE acfunlive SET liveCutNum = ?,isSync = 0 WHERE liveID = ?;`                            // 更新直播剪辑编号
+	updateDuration             = `UPDATE acfunlive SET duration = ?,isSync = 0 WHERE liveID = ?;`                              // 更新直播时长
+	updateCoverUrlAndLikeCount = `UPDATE acfunlive SET coverUrl = ?, likeCount = ?,isSync = 0 WHERE liveID = ?;`               // 更新封面和点赞数
+	updateMaxOnlineCount       = `UPDATE acfunlive SET maxOnlineCount = ?,isSync = 0 WHERE liveID = ? AND ? > maxOnlineCount;` // 更新最高在线人数
+	updateLikeCount            = `UPDATE acfunlive SET likeCount = ?,isSync = 0 WHERE liveID = ?;`                             // 更新点赞数
+	selectDurationZero         = `SELECT liveId FROM acfunlive WHERE duration = 0;`                                            // 查询duration为0的数据
 )
 
 var (

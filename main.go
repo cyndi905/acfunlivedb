@@ -445,6 +445,15 @@ func prepare_table(ctx context.Context) {
 			_, err = db.ExecContext(ctx, insertLiveCutNum)
 			checkErr(err)
 		}
+		// table存在，检查isSync是否存在
+		row = db.QueryRowContext(ctx, checkIsSync)
+		err = row.Scan(&n)
+		checkErr(err)
+		if n == 0 {
+			// isSync不存在，插入isSync
+			_, err = db.ExecContext(ctx, insertIsSync)
+			checkErr(err)
+		}
 	}
 	r := db.QueryRowContext(ctx, checkStreamerTable)
 	err = r.Scan(&n1)
