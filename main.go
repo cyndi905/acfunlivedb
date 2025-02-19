@@ -495,6 +495,9 @@ func main() {
 	dbFile := filepath.Join(dir, "acfunlive.db")
 
 	db, err = sql.Open("sqlite", dbFile)
+
+	// 设置 busy_timeout
+	_, err = db.Exec("PRAGMA busy_timeout = 3000;")
 	checkErr(err)
 	defer db.Close()
 	err = db.Ping()
