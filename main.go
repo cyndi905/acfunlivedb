@@ -513,15 +513,15 @@ func main() {
 	updateDurationStmt, err = db.PrepareContext(ctx, updateDuration)
 	checkErr(err)
 	defer updateDurationStmt.Close()
-	updateCoverUrlAndLikeCountStmt, err = db.PrepareContext(ctx, updateCoverUrlAndLikeCount)
+	updateCoverUrlAndLikeCountAndMaxOnlineCountStmt, err = db.PrepareContext(ctx, updateCoverUrlAndLikeCountAndMaxOnlineCount)
 	checkErr(err)
-	defer updateCoverUrlAndLikeCountStmt.Close()
-	updateLikeCountStmt, err = db.PrepareContext(ctx, updateLikeCount)
+	defer updateCoverUrlAndLikeCountAndMaxOnlineCountStmt.Close()
+	updateLikeCountAndMaxOnlineCountStmt, err = db.PrepareContext(ctx, updateLikeCountAndMaxOnlineCount)
 	checkErr(err)
-	defer updateLikeCountStmt.Close()
-	updateMaxOnlineCountStmt, err = db.PrepareContext(ctx, updateMaxOnlineCount)
-	checkErr(err)
-	defer updateMaxOnlineCountStmt.Close()
+	defer updateLikeCountAndMaxOnlineCountStmt.Close()
+	//updateMaxOnlineCountStmt, err = db.PrepareContext(ctx, updateMaxOnlineCount)
+	//checkErr(err)
+	//defer updateMaxOnlineCountStmt.Close()
 	selectUIDStmt, err = db.PrepareContext(ctx, selectUID)
 	checkErr(err)
 	defer selectUIDStmt.Close()
@@ -580,12 +580,12 @@ Loop:
 					oldLive := oldList[l.liveID]
 					// 确保oldLive不是nil指针
 					if oldLive != nil && (*oldLive).coverUrl == l.coverUrl {
-						updateLike(ctx, l.liveID, l.likeCount)
+						updateLikeAndMaxOnlineCount(ctx, l.liveID, l.likeCount, l.onlineCount)
 					} else {
 						// 封面发生改变时同时更新封面和点赞数
-						updateCoverAndLike(ctx, l.liveID, l.coverUrl, l.likeCount)
+						updateCoverAndLikeAndMaxOnlineCount(ctx, l.liveID, l.coverUrl, l.likeCount, l.onlineCount)
 					}
-					updateMaxOnline(ctx, l.liveID, l.onlineCount)
+					//updateMaxOnline(ctx, l.liveID, l.onlineCount)
 				}
 			}
 
