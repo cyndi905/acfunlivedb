@@ -142,7 +142,13 @@ func fetchLiveList() (list map[string]*live, e error) {
 		l.streamName = string(liveRoom.GetStringBytes("streamName"))
 		l.startTime = liveRoom.GetInt64("createTime")
 		l.title = string(liveRoom.GetStringBytes("title"))
-		l.coverUrl = string(liveRoom.GetArray("coverUrls")[0].GetStringBytes())
+		covers := liveRoom.GetArray("coverUrls")
+		if len(covers) > 0 {
+			l.coverUrl = string(covers[0].GetStringBytes())
+		} else {
+			// 当没有封面 URL 时，给个默认值或留空
+			l.coverUrl = ""
+		}
 		l.duration = 0
 		l.playbackURL = ""
 		l.backupURL = ""
