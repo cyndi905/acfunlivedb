@@ -764,6 +764,12 @@ func prepare_table(ctx context.Context) {
 	checkErr(err)
 	_, err = db.ExecContext(ctx, createNameIndex)
 	checkErr(err)
+	_, err = db.ExecContext(ctx, createDurationStartTimeIndex)
+	checkErr(err)
+	_, err = db.ExecContext(ctx, createDurationIndex)
+	checkErr(err)
+	_, err = db.ExecContext(ctx, createStartTimeIndex)
+	checkErr(err)
 }
 
 func main() {

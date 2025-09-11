@@ -60,11 +60,14 @@ LIMIT ?;
 `
 
 const (
-	selectLiveID                                = `SELECT uid FROM acfunlive WHERE liveID = ?;`                                                                                                                              // 根据liveID查询
-	createLiveIDIndex                           = `CREATE INDEX IF NOT EXISTS liveIDIndex ON acfunlive (liveID);`                                                                                                            // 生成liveID的index
-	createUIDIndex                              = `CREATE INDEX IF NOT EXISTS uidIndex ON acfunlive (uid);`                                                                                                                  // 生成uid的index
-	createNameIndex                             = `CREATE INDEX IF NOT EXISTS nameIndex ON streamer (name);`                                                                                                                 // 生成name的index
-	createStreamerUIDIndex                      = `CREATE INDEX IF NOT EXISTS uidIndex ON streamer (uid);`                                                                                                                   // 生成主播表uid的index
+	selectLiveID                                = `SELECT uid FROM acfunlive WHERE liveID = ?;`                                                    // 根据liveID查询
+	createLiveIDIndex                           = `CREATE INDEX IF NOT EXISTS liveIDIndex ON acfunlive (liveID);`                                  // 生成liveID的index
+	createUIDIndex                              = `CREATE INDEX IF NOT EXISTS uidIndex ON acfunlive (uid);`                                        // 生成uid的index
+	createNameIndex                             = `CREATE INDEX IF NOT EXISTS nameIndex ON streamer (name);`                                       // 生成name的index
+	createStreamerUIDIndex                      = `CREATE INDEX IF NOT EXISTS uidIndex ON streamer (uid);`                                         // 生成主播表uid的index
+	createDurationStartTimeIndex                = `CREATE INDEX IF NOT EXISTS idx_duration_startTime ON acfunlive (duration ASC, startTime DESC);` // 三个加快查询速度的索引
+	createStartTimeIndex                        = `CREATE INDEX IF NOT EXISTS idx_uid_startTime ON acfunlive (startTime DESC);`
+	createDurationIndex                         = `CREATE INDEX IF NOT EXISTS idx_lives_duration ON acfunlive (duration DESC);`
 	checkTable                                  = `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='acfunlive';`                                                                                              // 检查table是否存在
 	checkStreamerTable                          = `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='streamer';`                                                                                               // 检查主播table是否存在
 	checkLiveCutNum                             = `SELECT COUNT(*) AS CNTREC FROM pragma_table_info('acfunlive') WHERE name='liveCutNum';`                                                                                   // 检查liveCutNum是否存在
