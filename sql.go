@@ -4,9 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+const cursorFile = "last_sacn_start_time.txt"
 
 // 新建table
 const createTable = `CREATE TABLE IF NOT EXISTS acfunlive (
@@ -33,17 +40,77 @@ const createStreamerTable = `CREATE TABLE IF NOT EXISTS streamer (
 )
 `
 
+func getExecutableDir() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(exe), nil
+}
+
+// readLastStartTimeMS 从文件读取上次处理的最大 startTime（毫秒时间戳）
+func readLastStartTimeMS() int64 {
+	dir, err := getExecutableDir()
+	if err != nil {
+		log.Printf("获取可执行文件目录失败: %v", err)
+		return 0
+	}
+	cursorPath := filepath.Join(dir, cursorFile)
+	data, err := os.ReadFile(cursorPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Println("首次运行，从时间戳 0 开始")
+			return 0
+		}
+		log.Printf("读取游标文件失败: %v", err)
+		return 0
+	}
+	ts, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		log.Printf("解析时间戳失败（内容: %q）: %v", string(data), err)
+		return 0
+	}
+	return ts
+}
+
+// writeLastStartTimeMS 将最新的 startTime 写入游标文件
+func writeLastStartTimeMS(ts int64) {
+	dir, err := getExecutableDir()
+	if err != nil {
+		log.Printf("获取可执行文件目录失败: %v", err)
+		return
+	}
+	cursorPath := filepath.Join(dir, cursorFile)
+	err = os.WriteFile(cursorPath, []byte(strconv.FormatInt(ts, 10)), 0644)
+	if err != nil {
+		log.Printf("写入游标文件失败: %v", err)
+	}
+}
+
+// 获取本次处理的最大 startTime（用于更新游标）
+func getMaxStartTimeSince(db *sql.DB, lastTS int64) (int64, error) {
+	var maxTS int64
+	err := db.QueryRow(`
+		SELECT COALESCE(MAX(startTime), ?)
+		FROM acfunlive
+		WHERE startTime > ?
+	`, lastTS, lastTS).Scan(&maxTS)
+	return maxTS, err
+}
+
 const scanStreamerToTable = `INSERT INTO streamer (uid, name)
-SELECT uid, name
+SELECT a.uid, a.name
 FROM acfunlive AS a
-WHERE startTime = (
-    SELECT MAX(startTime)
+WHERE a.startTime > ?
+  AND a.startTime = (
+    SELECT MAX(b.startTime)
     FROM acfunlive AS b
-    WHERE a.uid = b.uid AND a.name = b.name
-)
-ON CONFLICT (uid)
+    WHERE b.uid = a.uid
+      AND b.startTime > ?
+  )
+ON CONFLICT(uid)
 DO UPDATE SET name = excluded.name
-WHERE streamer.name != excluded.name`
+WHERE streamer.name != excluded.name;`
 
 // 插入live
 const insertLive = `INSERT OR IGNORE INTO acfunlive
@@ -109,11 +176,32 @@ func insert(ctx context.Context, l *live) {
 func scanStreamer(ctx context.Context) {
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
-	_, err := scanStreamerStmt.ExecContext(ctx)
-	if err == nil {
-		log.Println("已更新主包表")
+
+	lastTS := readLastStartTimeMS()
+
+	// 执行增量更新（传两次 lastTS）
+	result, err := scanStreamerStmt.ExecContext(ctx, lastTS, lastTS)
+	if err != nil {
+		log.Printf("执行 scanStreamer 失败: %v", err)
+		return
 	}
-	checkErr(err)
+
+	rowsAffected, _ := result.RowsAffected()
+	log.Printf("已更新主播表，影响行数: %d", rowsAffected)
+
+	// 更新游标
+	newMaxTS, err := getMaxStartTimeSince(db, lastTS)
+	if err != nil {
+		log.Printf("获取最大 startTime 失败: %v", err)
+		return
+	}
+
+	if newMaxTS > lastTS {
+		writeLastStartTimeMS(newMaxTS)
+		log.Printf("游标已更新至 startTime=%d (%s)",
+			newMaxTS,
+			time.UnixMilli(newMaxTS).Format("2006-01-02 15:04:05.000"))
+	}
 }
 
 // 更新直播剪辑编号
