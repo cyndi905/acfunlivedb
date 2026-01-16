@@ -45,7 +45,7 @@ type live struct {
 }
 
 // 设备 ID
-var deviceID string
+//var deviceID string
 
 var client = &fasthttp.Client{
 	MaxIdleConnDuration: 90 * time.Second,
@@ -837,8 +837,8 @@ func main() {
 
 	ac, err = acfundanmu.NewAcFunLive()
 	checkErr(err)
-	deviceID, err = acfundanmu.GetDeviceID()
-	checkErr(err)
+	//deviceID, err = acfundanmu.GetDeviceID()
+	//checkErr(err)
 	// **根据模式启动不同的命令处理goroutine**
 	if *serviceMode {
 		go startSocketServer(childCtx) // 启动 Socket 服务器
