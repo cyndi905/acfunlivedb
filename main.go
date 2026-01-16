@@ -901,30 +901,30 @@ Loop:
 
 			for _, l := range oldList {
 				if _, ok := newList[l.liveID]; !ok {
+					// liveID对应的直播结束
+					go func(l *live) {
+						defer livePool.Put(l)
+						time.Sleep(10 * time.Second)
+						var summary *acfundanmu.Summary
+						var err error
+						err = runThrice(func() error {
+							summary, err = ac.GetSummary(l.liveID)
+							return err
+						})
+						if err != nil {
+							log.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
+							return
+						}
+						if summary.Duration == 0 {
+							log.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
+							return
+						}
+						insert(ctx, l)
+						updateLiveDuration(ctx, l.liveID, summary.Duration)
+					}(l)
 					// 有可能出现还在直播中但直播列表中没有的情况，需要再次确认是否下播
-					if IsLiveOnByPage(l.uid) == false {
-						// liveID对应的直播结束
-						go func(l *live) {
-							defer livePool.Put(l)
-							time.Sleep(10 * time.Second)
-							var summary *acfundanmu.Summary
-							var err error
-							err = runThrice(func() error {
-								summary, err = ac.GetSummary(l.liveID)
-								return err
-							})
-							if err != nil {
-								log.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
-								return
-							}
-							if summary.Duration == 0 {
-								log.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
-								return
-							}
-							insert(ctx, l)
-							updateLiveDuration(ctx, l.liveID, summary.Duration)
-						}(l)
-					}
+					//if IsLiveOnByPage(l.uid) == false {
+					//}
 				} else {
 					livePool.Put(l)
 				}
