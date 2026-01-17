@@ -74,7 +74,7 @@ var suspectedDownListMutex sync.RWMutex              // 保护 suspectedDownList
 var suspectedDownDBFile = "suspected_down_list.json" // 持久化文件名
 
 var (
-	oldListMutex       sync.RWMutex
+	//oldListMutex       sync.RWMutex
 	clientConnMutex    sync.Mutex // 限制单一连接
 	hasClient          bool       // 连接状态位
 	cmdMutex           sync.Mutex // 确保命令按顺序执行且阻塞
@@ -461,14 +461,13 @@ quit                 - 退出 (仅在窗口模式下可用)
 		} else if len(recs) != 0 {
 			count := 0
 			var liveIDsToUpdate []string
-			oldListMutex.RLock()
+			//oldListMutex.RLock()
 			for _, liveID := range recs {
 				if _, ok := oldList[liveID]; !ok {
 					liveIDsToUpdate = append(liveIDsToUpdate, liveID)
 				}
 			}
-			oldListMutex.RUnlock()
-
+			//oldListMutex.RUnlock()
 			if len(liveIDsToUpdate) == 0 {
 				fmt.Fprintln(output, "暂无需要补全的记录")
 				return
@@ -973,10 +972,7 @@ func main() {
 						}
 
 						// --- 4. 更新 oldList ---
-						oldListMutex.Lock()
 						oldList = newList
-						oldListMutex.Unlock()
-
 						time.Sleep(20 * time.Second)
 					}
 				}
