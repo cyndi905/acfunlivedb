@@ -74,6 +74,10 @@ var suspectedDownListMutex sync.RWMutex              // 保护 suspectedDownList
 var suspectedDownDBFile = "suspected_down_list.json" // 持久化文件名
 
 var (
+	oldListMutex       sync.RWMutex
+	clientConnMutex    sync.Mutex // 限制单一连接
+	hasClient          bool       // 连接状态位
+	cmdMutex           sync.Mutex // 确保命令按顺序执行且阻塞
 	liveListParserPool fastjson.ParserPool
 	liveCutParserPool  fastjson.ParserPool
 	quit               = make(chan struct{})
@@ -351,11 +355,13 @@ func quitSignal(cancel context.CancelFunc) {
 	signal.Reset(os.Interrupt, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
 	log.Println("正在退出本程序，请等待")
-	// 在退出前，确保将 suspectedDownList 保存到磁盘
-	if err := saveSuspectedDownListToDisk(); err != nil {
-		log.Printf("退出时保存疑似下播列表失败: %v", err)
-	} else {
-		log.Println("疑似下播列表已保存到磁盘")
+	if len(suspectedDownList) != 0 {
+		// 在退出前，确保将 suspectedDownList 保存到磁盘
+		if err := saveSuspectedDownListToDisk(); err != nil {
+			log.Printf("退出时保存疑似下播列表失败: %v", err)
+		} else {
+			log.Println("疑似下播列表已保存到磁盘")
+		}
 	}
 	cancel()
 }
@@ -373,291 +379,182 @@ func duration(dtime int64) string {
 }
 
 func processCommand(ctx context.Context, commandLine string, output io.Writer) {
+	cmdMutex.Lock()
+	defer cmdMutex.Unlock()
+	// 判断当前是否是 Socket 客户端连接（非终端直接输入）
+	// 如果 output 是 os.Stdout，说明是本地交互模式，不需要发送协议信号
+	isSocket := true
+	if output == os.Stdout {
+		isSocket = false
+	}
+	flush := func() {
+		if bw, ok := output.(*bufio.Writer); ok {
+			bw.Flush()
+		}
+	}
+	// 只有 Socket 模式才发送协议信号
+	if isSocket {
+		fmt.Fprintln(output, ":::BUSY:::")
+		flush()
+	}
+	// 任务结束后发送 IDLE 的逻辑也需要判断
+	defer func() {
+		if isSocket {
+			fmt.Fprintln(output, ":::IDLE:::")
+			flush()
+		}
+	}()
+
 	const helpMsg = `Commands:
-listall <uid>...     - 查询改uid的主包所有直播记录
-list10 <uid>...      - 查询改uid的主包10条直播记录
+listall <uid>...     - 查询该uid的所有直播记录
+list10 <uid>...      - 查询该uid的10条直播记录
 getplayback <liveID>... - 通过liveID获取回放地址
 detail <liveID>...   - 查询该条直播信息
 checkrec             - 扫描已结束的直播记录并补全信息
 scanstreamer         - 扫描新增的主包
-fix                  - 修复直播记录（直播记录显示结束的但实际还在直播的记录）
-quit                 - 退出 (仅在窗口模式下可用，服务模式运行时无法使用)
-` // 更新帮助信息
+fix                  - 修复直播记录
+quit                 - 退出 (仅在窗口模式下可用)
+`
 
 	cmd := strings.Fields(commandLine)
 	if len(cmd) == 0 {
-		_, err := fmt.Fprintln(output, helpMsg)
-		if err != nil {
-			return
-		} // 输出到指定的 Writer
+		fmt.Fprintln(output, helpMsg)
 		return
 	}
 
 	switch cmd[0] {
 	case "quit":
-		// 在服务模式下，quit 命令不应该直接退出整个程序，
-		// 这里我们让它在终端模式下发送退出信号，服务模式下提示无效。
 		if !*serviceMode {
-			_, err := fmt.Fprintln(output, "Shutting down...")
-			if err != nil {
-				return
-			}
+			fmt.Fprintln(output, "Shutting down...")
+			flush()
 			quit <- struct{}{}
 		} else {
-			_, err := fmt.Fprintln(output, "Quit command is not available in service mode directly. Use OS signals or dedicated shutdown mechanism.")
-			if err != nil {
-				return
-			}
+			fmt.Fprintln(output, "Quit command is not available in service mode.")
 		}
+		return // 这里 defer 会执行，发送 IDLE
+
 	case "fix":
-		_, err := fmt.Fprintln(output, "正在修复duration信息，请等待")
-		if err != nil {
-			return
-		}
-		// 异步执行，日志会输出到主日志文件
-		go func() {
-			if len(oldList) == 0 {
-				log.Println("目前没有正在直播的，请稍后再尝试") // 这个日志还是去文件
-				_, err := fmt.Fprintln(output, "目前没有正在直播的，请稍后再尝试")
-				if err != nil {
-					return
-				} // 这个输出到客户端
-			} else {
-				for _, live := range oldList {
-					updateLiveDuration(ctx, live.liveID, 0)
-					log.Printf("已修复liveId为 %s 的duration信息为0", live.liveID) // 这个日志还是去文件
-					_, err := fmt.Fprintf(output, "已修复liveId为 %s 的duration信息为0\n", live.liveID)
-					if err != nil {
-						return
-					} // 这个输出到客户端
-				}
-				_, err2 := fmt.Fprintln(output, "修复完成")
-				if err2 != nil {
-					return
-				}
+		fmt.Fprintln(output, "正在修复duration信息，请等待")
+		flush()
+		if len(oldList) == 0 {
+			fmt.Fprintln(output, "目前没有正在直播的，请稍后再尝试")
+		} else {
+			for _, live := range oldList {
+				updateLiveDuration(ctx, live.liveID, 0)
+				fmt.Fprintf(output, "已修复liveId为 %s 的duration信息为0\n", live.liveID)
+				flush()
 			}
-		}()
+			fmt.Fprintln(output, "修复完成")
+		}
+
 	case "scanstreamer":
-		_, err := fmt.Fprintln(output, "正在扫描并主包，请等待")
-		if err != nil {
-			return
-		}
-		go scanStreamer(ctx) // 异步执行，日志会输出到主日志文件
+		fmt.Fprintln(output, "正在扫描新增主播，请等待")
+		flush()
+		scanStreamer(ctx)
+
 	case "checkrec":
-		_, err := fmt.Fprintln(output, "正在扫描并补全直播信息，请等待")
+		fmt.Fprintln(output, "正在扫描并补全直播信息，请等待")
+		flush()
+		recs, err := queryDurationZero(ctx)
 		if err != nil {
-			return
-		}
-		go func() { // 异步执行，日志会输出到主日志文件
-			recs, err := queryDurationZero(ctx)
-			if err != nil {
-				log.Println(err) // 这个日志还是去文件
-				_, err := fmt.Fprintln(output, "Error querying records with duration 0:", err)
-				if err != nil {
-					return
-				} // 输出到客户端
-			} else {
-				if len(recs) != 0 {
-					count := 0
-					var mu sync.Mutex
-					// 筛选当前不在直播中的记录
-					var liveIDsToUpdate []string
-					for _, liveID := range recs {
-						if _, ok := oldList[liveID]; !ok {
-							liveIDsToUpdate = append(liveIDsToUpdate, liveID)
-						}
-					}
-
-					if len(liveIDsToUpdate) == 0 {
-						_, err := fmt.Fprintln(output, "暂无需要补全时长的不在直播的记录")
-						if err != nil {
-							return
-						}
-						return
-					}
-
-					_, err := fmt.Fprintf(output, "找到 %d 条需要补全时长的记录\n", len(liveIDsToUpdate))
-					if err != nil {
-						return
-					}
-
-					for i, liveID := range liveIDsToUpdate {
-						select {
-						case <-ctx.Done():
-							_, err := fmt.Fprintln(output, "补全任务已取消")
-							if err != nil {
-								return
-							}
-							log.Println("补全任务已取消") // 这个日志还是去文件
-							return
-						default:
-							// Seed the random number generator
-							r := rand.New(rand.NewSource(time.Now().UnixNano()))
-							// Generate a random number between 5 and 10
-							sleepTime := time.Duration(5+r.Intn(6)) * time.Second
-							time.Sleep(sleepTime)
-
-							info, err := getPlayback(liveID) // 注意：getPlayback 内部使用了 runThrice 和 log.Printf
-							if err != nil {
-								log.Printf("Error getting playback for liveID %s: %v", liveID, err) // 这个日志还是去文件
-								_, err := fmt.Fprintf(output, "Error getting playback for liveID %s: %v\n", liveID, err)
-								if err != nil {
-									return
-								} // 输出到客户端
-							} else {
-								if info.Duration != 0 {
-									mu.Lock()
-									updateLiveDuration(ctx, liveID, info.Duration)
-									count++
-									mu.Unlock()
-									log.Printf("liveID为 %s 的记录已更新直播时长为：%d，进度: %d/%d", liveID, info.Duration, i+1, len(liveIDsToUpdate)) // 这个日志还是去文件
-									_, err := fmt.Fprintf(output, "liveID为 %s 的记录已更新直播时长为：%d，进度: %d/%d\n", liveID, info.Duration, i+1, len(liveIDsToUpdate))
-									if err != nil {
-										return
-									} // 输出到客户端
-								} else {
-									log.Printf("liveID为 %s 的记录无需更新直播时长，进度: %d/%d", liveID, i+1, len(liveIDsToUpdate)) // 这个日志还是去文件
-									_, err := fmt.Fprintf(output, "liveID为 %s 的记录无需更新直播时长，进度: %d/%d\n", liveID, i+1, len(liveIDsToUpdate))
-									if err != nil {
-										return
-									} // 输出到客户端
-								}
-							}
-						}
-					}
-					log.Printf("已为%d条记录更新直播时长", count) // 这个日志还是去文件
-					_, err = fmt.Fprintf(output, "已为%d条记录更新直播时长\n", count)
-					if err != nil {
-						return
-					} // 输出到客户端
-				} else {
-					log.Printf("暂无duration为0的数据") // 这个日志还是去文件
-					_, err := fmt.Fprintln(output, "暂无duration为0的数据")
-					if err != nil {
-						return
-					} // 输出到客户端
+			fmt.Fprintln(output, "查询失败:", err)
+		} else if len(recs) != 0 {
+			count := 0
+			var liveIDsToUpdate []string
+			oldListMutex.RLock()
+			for _, liveID := range recs {
+				if _, ok := oldList[liveID]; !ok {
+					liveIDsToUpdate = append(liveIDsToUpdate, liveID)
 				}
 			}
-		}()
+			oldListMutex.RUnlock()
 
-	default: // 处理带参数的命令
+			if len(liveIDsToUpdate) == 0 {
+				fmt.Fprintln(output, "暂无需要补全的记录")
+				return
+			}
+
+			fmt.Fprintf(output, "找到 %d 条需要补全的记录\n", len(liveIDsToUpdate))
+			flush()
+
+			for i, liveID := range liveIDsToUpdate {
+				select {
+				case <-ctx.Done():
+					fmt.Fprintln(output, "任务已取消")
+					return
+				default:
+					r := rand.New(rand.NewSource(time.Now().UnixNano()))
+					time.Sleep(time.Duration(5+r.Intn(6)) * time.Second)
+
+					info, err := getPlayback(liveID)
+					if err != nil {
+						fmt.Fprintf(output, "获取 liveID %s 失败: %v\n", liveID, err)
+					} else {
+						if info.Duration != 0 {
+							updateLiveDuration(ctx, liveID, info.Duration)
+							count++
+							fmt.Fprintf(output, "liveID %s 已更新时长: %d (%d/%d)\n", liveID, info.Duration, i+1, len(liveIDsToUpdate))
+						} else {
+							fmt.Fprintf(output, "liveID %s 时长仍为0，跳过 (%d/%d)\n", liveID, i+1, len(liveIDsToUpdate))
+						}
+					}
+					flush()
+				}
+			}
+			fmt.Fprintf(output, "补全结束，共更新 %d 条记录\n", count)
+		} else {
+			fmt.Fprintln(output, "暂无duration为0的数据")
+		}
+
+	default:
 		if len(cmd) < 2 {
-			_, err := fmt.Fprintln(output, "命令缺少参数:", cmd[0])
-			if err != nil {
-				return
-			}
-			_, err = fmt.Fprintln(output, helpMsg)
-			if err != nil {
-				return
-			}
+			fmt.Fprintln(output, "命令缺少参数:", cmd[0])
+			fmt.Fprintln(output, helpMsg)
 			return
 		}
 		switch cmd[0] {
 		case "listall":
 			for _, u := range cmd[1:] {
-				uid, err := strconv.ParseUint(u, 10, 64)
-				if err != nil {
-					_, err := fmt.Fprintln(output, "无效的UID:", u)
-					if err != nil {
-						return
-					}
-					_, err = fmt.Fprintln(output, helpMsg)
-					if err != nil {
-						return
-					}
-				} else {
-					handleQuery(ctx, int(uid), -1, output) // <-- 传递 output Writer
+				if uid, err := strconv.ParseUint(u, 10, 64); err == nil {
+					handleQuery(ctx, int(uid), -1, output)
 				}
 			}
 		case "list10":
 			for _, u := range cmd[1:] {
-				uid, err := strconv.ParseUint(u, 10, 64)
-				if err != nil {
-					_, err := fmt.Fprintln(output, "无效的UID:", u)
-					if err != nil {
-						return
-					}
-					_, err = fmt.Fprintln(output, helpMsg)
-					if err != nil {
-						return
-					}
-				} else {
-					handleQuery(ctx, int(uid), 10, output) // <-- 传递 output Writer
+				if uid, err := strconv.ParseUint(u, 10, 64); err == nil {
+					handleQuery(ctx, int(uid), 10, output)
 				}
 			}
 		case "getplayback":
-			_, err := fmt.Fprintln(output, "查询录播链接，请等待")
-			if err != nil {
-				return
-			}
+			fmt.Fprintln(output, "查询录播链接中...")
+			flush()
 			for _, liveID := range cmd[1:] {
-				playback, err := getPlayback(liveID) // 注意：getPlayback 内部使用了 runThrice 和 log.Printf
+				playback, err := getPlayback(liveID)
 				if err != nil {
-					log.Println(err) // 这个日志还是去文件
-					_, err := fmt.Fprintln(output, "Error getting playback for liveID", liveID, ":", err)
-					if err != nil {
-						return
-					} // 输出到客户端
+					fmt.Fprintf(output, "查询 %s 失败: %v\n", liveID, err)
 				} else {
-					if playback.Duration != 0 {
-						// 仅在数据库中存在该 liveID 时才更新 duration
-						if queryExist(ctx, liveID) { // queryExist 需要 dbMutex
-							updateLiveDuration(ctx, liveID, playback.Duration) // updateLiveDuration 需要 dbMutex
-						} else {
-							log.Printf("liveID %s 不在数据库中，跳过更新 duration", liveID)
-							_, err := fmt.Fprintf(output, "liveID %s 不在数据库中，跳过更新 duration\n", liveID)
-							if err != nil {
-								return
-							}
-						}
+					if playback.Duration != 0 && queryExist(ctx, liveID) {
+						updateLiveDuration(ctx, liveID, playback.Duration)
 					}
-					_, err := fmt.Fprintf(output, "liveID为 %s 的录播查询结果是：\n录播链接：%s\n录播备份链接：%s\n",
-						liveID, playback.URL, playback.BackupURL,
-					)
-					if err != nil {
-						return
-					} // 输出到客户端
+					fmt.Fprintf(output, "ID: %s\n链接: %s\n备份: %s\n", liveID, playback.URL, playback.BackupURL)
 				}
+				flush()
 			}
 		case "detail":
 			for _, u := range cmd[1:] {
-				err := runThrice(func() error {
+				_ = runThrice(func() error {
 					summary, err := ac.GetSummary(u)
 					if summary != nil {
-						// 使用 fmt.Fprintf 将结果输出到 output Writer
-						_, err := fmt.Fprintf(output, "liveID为 %s 的直播信息：duration:%d，点赞总数:%d，看过人数:%d\n", u, summary.Duration, summary.LikeCount, summary.WatchCount)
-						if err != nil {
-							return err
-						}
-					} else if err == nil {
-						// 如果 summary 为 nil 但 err 也为 nil，可能是直播不存在或已删除
-						_, err := fmt.Fprintf(output, "liveID为 %s 的直播信息未找到或已删除\n", u)
-						if err != nil {
-							return err
-						}
+						fmt.Fprintf(output, "ID %s: 时长:%d, 点赞:%d, 观看:%d\n", u, summary.Duration, summary.LikeCount, summary.WatchCount)
 					}
-					return err // runThrice 依赖这里的错误返回
+					return err
 				})
-				if err != nil {
-					log.Printf("Error getting detail for liveID %s: %v", u, err) // 这个日志还是去文件
-					_, err := fmt.Fprintf(output, "Error getting detail for liveID %s: %v\n", u, err)
-					if err != nil {
-						return
-					} // 输出到客户端
-				}
 			}
 		default:
-			_, err := fmt.Fprintln(output, "未知命令:", cmd[0])
-			if err != nil {
-				return
-			}
-			_, err = fmt.Fprintln(output, helpMsg)
-			if err != nil {
-				return
-			}
+			fmt.Fprintln(output, "未知命令:", cmd[0])
+			fmt.Fprintln(output, helpMsg)
 		}
 	}
-
 }
 
 // 处理查询
@@ -719,103 +616,64 @@ func startInteractiveHandler(ctx context.Context) {
 	}
 }
 
-// **服务模式 Socket 服务器**
-func startSocketServer(ctx context.Context) {
-	// 启动前先移除旧的 Socket 文件
-	os.Remove(socketPath)
-
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		log.Fatalf("无法监听 Unix Socket: %v", err)
-	}
-	log.Printf("服务模式已启动，监听 Socket: %s", socketPath)
-
-	// 确保退出时清理 Socket 文件
-	go func() {
-		<-ctx.Done()
-		log.Println("Context Done, closing socket listener")
-		listener.Close()
-		os.Remove(socketPath) // 清理 Socket 文件
-	}()
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			// 如果 Context Done，Accept 会返回错误，这里判断后正常退出
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				log.Printf("接受连接错误: %v", err)
-				continue
-			}
-		}
-		log.Printf("接受到新连接")
-		// 为每个连接启动一个 goroutine 处理
-		go handleSocketConnection(ctx, conn)
-	}
-}
-
 // **处理单个 Socket 连接**
 func handleSocketConnection(ctx context.Context, conn net.Conn) {
 	defer func() {
-		log.Printf("连接关闭: %s", conn.RemoteAddr().Network()) // Unix Socket 没有 RemoteAddr() 严格意义上的网络地址
-		err := conn.Close()
-		if err != nil {
-			return
-		}
+		conn.Close()
+		clientConnMutex.Lock()
+		hasClient = false // 释放连接占位
+		clientConnMutex.Unlock()
+		log.Printf("客户端断开连接")
 	}()
 
 	scanner := bufio.NewScanner(conn)
 	writer := bufio.NewWriter(conn)
 
-	_, err := fmt.Fprintln(writer, "连接成功，输入 'help' 查看命令列表")
-	if err != nil {
-		return
-	}
-	err = writer.Flush()
-	if err != nil {
-		return
-	} // 确保立即发送欢迎消息
+	fmt.Fprintln(writer, "连接成功。请输入命令：")
+	writer.Flush()
 
-	for {
+	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			_, err := fmt.Fprintln(writer, "服务正在关闭，连接断开")
-			if err != nil {
-				return
-			}
-			err = writer.Flush()
-			if err != nil {
-				return
-			}
-			return // Context Cancelled, exit handler
+			return
 		default:
-			// 设置读取超时，防止连接僵死
-			err := conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
-			if err != nil {
-				return
-			} // 例如 5 分钟无活动自动断开
-			if !scanner.Scan() {
-				if err := scanner.Err(); err != nil {
-					if err == io.EOF {
-						log.Println("客户端连接已关闭 (EOF)")
-					} else {
-						log.Printf("从连接读取命令错误: %v", err)
-					}
-				}
-				return // 读取错误或 EOF，关闭连接
-			}
 			commandLine := scanner.Text()
-			log.Printf("收到命令: %s", commandLine) // 记录收到的命令
-
-			// 调用通用的命令处理函数，输出到 Socket 连接
+			// 这里会阻塞，直到 processCommand 执行完并释放锁
 			processCommand(ctx, commandLine, writer)
-			err = writer.Flush()
-			if err != nil {
-				return
-			} // 每次处理完命令后刷新缓冲区，发送结果
 		}
+	}
+}
+
+// **服务模式 Socket 服务器**
+func startSocketServer(ctx context.Context) {
+	os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		log.Fatalf("Listen error: %v", err)
+	}
+
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+
+		clientConnMutex.Lock()
+		if hasClient {
+			fmt.Fprintln(conn, "拒绝连接：已有客户端正在操作。")
+			conn.Close()
+			clientConnMutex.Unlock()
+			continue
+		}
+		hasClient = true
+		clientConnMutex.Unlock()
+
+		go handleSocketConnection(ctx, conn)
 	}
 }
 
@@ -910,8 +768,6 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	childCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	go quitSignal(cancel)
 
 	path, err := os.Executable()
@@ -959,8 +815,6 @@ func main() {
 
 	ac, err = acfundanmu.NewAcFunLive()
 	checkErr(err)
-	//deviceID, err = acfundanmu.GetDeviceID()
-	//checkErr(err)
 
 	// 在初始化其他组件后，加载疑似下播列表
 	if err := loadSuspectedDownListFromDisk(); err != nil {
@@ -969,154 +823,169 @@ func main() {
 
 	// **根据模式启动不同的命令处理goroutine**
 	if *serviceMode {
-		go startSocketServer(childCtx) // 启动 Socket 服务器
+		go startSocketServer(ctx) // 启动 Socket 服务器
 	} else {
-		go startInteractiveHandler(childCtx) // 启动终端输入处理
+		go startInteractiveHandler(ctx) // 启动终端输入处理
 	}
 
 	oldList = make(map[string]*live)
-Loop:
-	for {
-		select {
-		case <-childCtx.Done():
-			log.Println("收到退出信号，正在停止...")
-			break Loop
-		default:
-			var newList map[string]*live
-			err = runThrice(func() error {
-				newList, err = fetchLiveList()
-				return err
-			})
-			if err != nil {
-				log.Printf("获取直播间列表数据出现过多错误，跳过本次更新：%v", err)
-				time.Sleep(10 * time.Second) // 错误时等待更长时间
-				continue                     // 跳过本次循环
-			}
-
-			if len(newList) == 0 {
-				log.Println("没有人在直播")
-			}
-
-			// --- 1. 处理新增和更新 ---
-			for _, l := range newList {
-				if _, ok := oldList[l.liveID]; !ok {
-					// 新的liveID
-					insert(ctx, l)
-					go func(uid int, liveID string) {
-						var num int
-						var err error
+	go func() {
+		log.Println("后台抓取启动")
+		oldList = make(map[string]*live)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				for {
+					select {
+					case <-ctx.Done():
+						log.Println("收到退出信号，正在停止...")
+						return
+					default:
+						var newList map[string]*live
 						err = runThrice(func() error {
-							num, err = fetchLiveCut(uid, liveID)
+							newList, err = fetchLiveList()
 							return err
 						})
 						if err != nil {
-							log.Printf("获取uid为 %d 的主播的liveID为 %s 的直播剪辑编号失败，放弃获取", uid, liveID)
-							return
+							log.Printf("获取直播间列表数据出现过多错误，跳过本次更新：%v", err)
+							time.Sleep(10 * time.Second) // 错误时等待更长时间
+							continue                     // 跳过本次循环
 						}
-						updateLiveCutNum(ctx, liveID, num)
-					}(l.uid, l.liveID)
-				} else {
-					oldLive := oldList[l.liveID]
-					// 确保oldLive不是nil指针
-					if oldLive != nil && (*oldLive).coverUrl == l.coverUrl {
-						updateLikeAndMaxOnlineCount(ctx, l.liveID, l.likeCount, l.onlineCount)
-					} else {
-						// 封面发生改变时同时更新封面和点赞数
-						updateCoverAndLikeAndMaxOnlineCount(ctx, l.liveID, l.coverUrl, l.likeCount, l.onlineCount)
+
+						if len(newList) == 0 {
+							log.Println("没有人在直播")
+						}
+
+						// --- 1. 处理新增和更新 ---
+						for _, l := range newList {
+							if _, ok := oldList[l.liveID]; !ok {
+								// 新的liveID
+								insert(ctx, l)
+								go func(uid int, liveID string) {
+									var num int
+									var err error
+									err = runThrice(func() error {
+										num, err = fetchLiveCut(uid, liveID)
+										return err
+									})
+									if err != nil {
+										log.Printf("获取uid为 %d 的主播的liveID为 %s 的直播剪辑编号失败，放弃获取", uid, liveID)
+										return
+									}
+									updateLiveCutNum(ctx, liveID, num)
+								}(l.uid, l.liveID)
+							} else {
+								oldLive := oldList[l.liveID]
+								// 确保oldLive不是nil指针
+								if oldLive != nil && (*oldLive).coverUrl == l.coverUrl {
+									updateLikeAndMaxOnlineCount(ctx, l.liveID, l.likeCount, l.onlineCount)
+								} else {
+									// 封面发生改变时同时更新封面和点赞数
+									updateCoverAndLikeAndMaxOnlineCount(ctx, l.liveID, l.coverUrl, l.likeCount, l.onlineCount)
+								}
+								//updateMaxOnline(ctx, l.liveID, l.onlineCount)
+							}
+						}
+
+						// --- 2. 检查 suspectedDownList 中的直播间 ---
+						now := time.Now()
+						suspectedDownListMutex.Lock() // 在迭代和修改 suspectedDownList 前加锁
+						for liveID, item := range suspectedDownList {
+							// 检查是否超过设定的超时时间 (例如 5 分钟)
+							if now.Sub(item.timestamp) >= 5*time.Minute {
+								// 超时仍未在新列表中出现，再次确认是否下播
+								log.Printf("定期检查：直播间 %s (%s) 超时未在列表中出现，再次确认下播状态...", item.live.name, liveID)
+								if isLiveOnByPage(item.live.uid, item.live.liveID) == false {
+									// 确认下播
+									log.Printf("确认下播：直播间 %s (%s)", item.live.name, liveID)
+									go func(l *live) {
+										defer livePool.Put(l)
+										time.Sleep(10 * time.Second)
+										var summary *acfundanmu.Summary
+										var err error
+										err = runThrice(func() error {
+											// 需要确保 ac 对象在此处可用
+											summary, err = ac.GetSummary(l.liveID)
+											return err
+										})
+										if err != nil {
+											log.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
+											return
+										}
+										if summary.Duration == 0 {
+											log.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
+											return
+										}
+										insert(ctx, l)
+										updateLiveDuration(ctx, l.liveID, summary.Duration)
+									}(item.live)
+									// 从疑似列表中移除 - 使用封装函数
+									removeSuspectedDown(liveID)
+								} else {
+									// 仍然在线，刷新时间戳，继续等待
+									log.Printf("直播间 %s (%s) 仍在直播，刷新待检查时间", item.live.name, liveID)
+									item.timestamp = now
+									suspectedDownList[liveID] = item
+								}
+							}
+						}
+						suspectedDownListMutex.Unlock() // 释放锁
+
+						// --- 3. 处理可能下播的旧直播间 ---
+						for _, l := range oldList {
+							if _, ok := newList[l.liveID]; !ok {
+								// 在新列表中找不到，需要检查
+								isActuallyOffline := isLiveOnByPage(l.uid, l.liveID)
+								if !isActuallyOffline {
+									// 确认已下播
+									go func(l *live) {
+										defer livePool.Put(l)
+										time.Sleep(10 * time.Second)
+										var summary *acfundanmu.Summary
+										var err error
+										err = runThrice(func() error {
+											summary, err = ac.GetSummary(l.liveID)
+											return err
+										})
+										if err != nil {
+											log.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
+											return
+										}
+										if summary.Duration == 0 {
+											log.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
+											return
+										}
+										insert(ctx, l)
+										updateLiveDuration(ctx, l.liveID, summary.Duration)
+									}(l)
+								} else {
+									// isLiveOnByPage 返回 true，说明可能还在播，或者API不稳定返回了true
+									// 将其加入疑似下播列表 - 使用封装函数
+									addSuspectedDown(l.liveID, suspectedDown{l, time.Now()})
+									log.Printf("直播间 %s (%s) 暂时无法从列表获取但未确认下播，已加入待检查列表", l.name, l.liveID)
+								}
+							} else {
+								// 在新列表中找到，说明仍在播，回收旧的 live 对象
+								livePool.Put(l)
+							}
+						}
+
+						// --- 4. 更新 oldList ---
+						oldListMutex.Lock()
+						oldList = newList
+						oldListMutex.Unlock()
+
+						time.Sleep(20 * time.Second)
 					}
-					//updateMaxOnline(ctx, l.liveID, l.onlineCount)
 				}
+
 			}
-
-			// --- 2. 检查 suspectedDownList 中的直播间 ---
-			now := time.Now()
-			suspectedDownListMutex.Lock() // 在迭代和修改 suspectedDownList 前加锁
-			for liveID, item := range suspectedDownList {
-				// 检查是否超过设定的超时时间 (例如 5 分钟)
-				if now.Sub(item.timestamp) >= 5*time.Minute {
-					// 超时仍未在新列表中出现，再次确认是否下播
-					log.Printf("定期检查：直播间 %s (%s) 超时未在列表中出现，再次确认下播状态...", item.live.name, liveID)
-					if isLiveOnByPage(item.live.uid, item.live.liveID) == false {
-						// 确认下播
-						log.Printf("确认下播：直播间 %s (%s)", item.live.name, liveID)
-						go func(l *live) {
-							defer livePool.Put(l)
-							time.Sleep(10 * time.Second)
-							var summary *acfundanmu.Summary
-							var err error
-							err = runThrice(func() error {
-								// 需要确保 ac 对象在此处可用
-								summary, err = ac.GetSummary(l.liveID)
-								return err
-							})
-							if err != nil {
-								log.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
-								return
-							}
-							if summary.Duration == 0 {
-								log.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
-								return
-							}
-							insert(ctx, l)
-							updateLiveDuration(ctx, l.liveID, summary.Duration)
-						}(item.live)
-						// 从疑似列表中移除 - 使用封装函数
-						removeSuspectedDown(liveID)
-					} else {
-						// 仍然在线，刷新时间戳，继续等待
-						log.Printf("直播间 %s (%s) 仍在直播，刷新待检查时间", item.live.name, liveID)
-						item.timestamp = now
-						suspectedDownList[liveID] = item
-					}
-				}
-			}
-			suspectedDownListMutex.Unlock() // 释放锁
-
-			// --- 3. 处理可能下播的旧直播间 ---
-			for _, l := range oldList {
-				if _, ok := newList[l.liveID]; !ok {
-					// 在新列表中找不到，需要检查
-					isActuallyOffline := isLiveOnByPage(l.uid, l.liveID)
-					if !isActuallyOffline {
-						// 确认已下播
-						go func(l *live) {
-							defer livePool.Put(l)
-							time.Sleep(10 * time.Second)
-							var summary *acfundanmu.Summary
-							var err error
-							err = runThrice(func() error {
-								summary, err = ac.GetSummary(l.liveID)
-								return err
-							})
-							if err != nil {
-								log.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
-								return
-							}
-							if summary.Duration == 0 {
-								log.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
-								return
-							}
-							insert(ctx, l)
-							updateLiveDuration(ctx, l.liveID, summary.Duration)
-						}(l)
-					} else {
-						// isLiveOnByPage 返回 true，说明可能还在播，或者API不稳定返回了true
-						// 将其加入疑似下播列表 - 使用封装函数
-						addSuspectedDown(l.liveID, suspectedDown{l, time.Now()})
-						log.Printf("直播间 %s (%s) 暂时无法从列表获取但未确认下播，已加入待检查列表", l.name, l.liveID)
-					}
-				} else {
-					// 在新列表中找到，说明仍在播，回收旧的 live 对象
-					livePool.Put(l)
-				}
-			}
-
-			// --- 4. 更新 oldList ---
-			oldList = newList
-
-			time.Sleep(20 * time.Second)
 		}
-	}
+	}()
+	<-ctx.Done() // 这一行会阻塞主线程，直到 quit 信号触发 cancel()
+	log.Println("主程序退出")
 }
 
 // 判断该场直播是否还在直播中

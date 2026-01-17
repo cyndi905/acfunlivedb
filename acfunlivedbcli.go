@@ -10,7 +10,7 @@ import (
 	"net"
 	"os"
 	"strings"
-	"time"
+	"sync/atomic" // 使用原子操作标记状态，更简单可靠
 )
 
 func main() {
@@ -22,53 +22,82 @@ func main() {
 	}
 	defer conn.Close()
 
-	reader := bufio.NewReader(os.Stdin)
-	connReader := bufio.NewReader(conn)
-	connWriter := bufio.NewWriter(conn)
+	fmt.Println("连接成功，输入命令 ('quit' 或 'exit' 退出客户端)")
 
-	fmt.Println("连接成功，输入命令 ('quit' to exit client)")
+	// busy 标志位：1 表示服务端忙碌，0 表示空闲
+	var isBusy int32 = 0
+	// 通知通道，用于在服务端处理完后立即唤醒输入提示
+	idleChan := make(chan struct{}, 1)
 
-	// 启动一个 goroutine 读取服务端的响应并打印
+	// 1. 启动读取协程
 	go func() {
+		reader := bufio.NewReader(conn)
 		for {
-			conn.SetReadDeadline(time.Now().Add(5 * time.Minute)) // 设置读取超时
-			line, err := connReader.ReadString('\n')
+			line, err := reader.ReadString('\n')
 			if err != nil {
-				if err != io.EOF {
-					fmt.Fprintf(os.Stderr, "从服务端读取错误: %v\n", err)
+				if err == io.EOF {
+					fmt.Println("\n[服务端已断开连接]")
 				} else {
-					fmt.Fprintln(os.Stderr, "服务端连接已关闭")
+					fmt.Printf("\n[读取错误]: %v\n", err)
 				}
-				os.Exit(1) // 服务端断开，客户端也退出
+				os.Exit(0)
 			}
-			fmt.Print("服务响应: ", line)
+
+			// 处理特殊的协议信号
+			cleanLine := strings.TrimSpace(line)
+			if cleanLine == ":::BUSY:::" {
+				atomic.StoreInt32(&isBusy, 1)
+				continue // 不打印信号本身
+			} else if cleanLine == ":::IDLE:::" {
+				atomic.StoreInt32(&isBusy, 0)
+				// 发送信号尝试唤醒提示符
+				select {
+				case idleChan <- struct{}{}:
+				default:
+				}
+				continue // 不打印信号本身
+			}
+
+			// 打印正常的业务输出（包括进度条）
+			fmt.Print(line)
 		}
 	}()
 
-	// 读取用户输入并发送给服务端
+	// 2. 主循环：读取用户输入
+	scanner := bufio.NewScanner(os.Stdin)
 	for {
-		fmt.Print("> ") // 客户端提示符
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			if err != io.EOF {
-				fmt.Fprintf(os.Stderr, "读取输入错误: %v\n", err)
-			}
-			break // 读取输入错误，退出循环
+		// 如果服务端忙碌，则阻塞等待 idleChan 信号
+		if atomic.LoadInt32(&isBusy) == 1 {
+			<-idleChan
 		}
 
-		command := strings.TrimSpace(input)
-		if command == "quit" {
-			// 客户端输入 quit，只退出客户端，不发送给服务端
+		fmt.Print("> ")
+		if !scanner.Scan() {
 			break
 		}
 
-		_, err = connWriter.WriteString(command + "\n")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "发送命令到服务端错误: %v\n", err)
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			continue
+		}
+		if input == "exit" || input == "quit" {
 			break
 		}
-		connWriter.Flush()
+
+		// 发送前双重检查状态，防止在等待输入时服务端突然变忙（虽然在单用户下很少见）
+		if atomic.LoadInt32(&isBusy) == 1 {
+			fmt.Println("服务端正在处理其他任务，请稍后...")
+			continue
+		}
+
+		_, err := fmt.Fprintln(conn, input)
+		if err != nil {
+			fmt.Printf("发送失败: %v\n", err)
+			break
+		}
+
+		// 发送完指令后，立即进入忙碌状态，等待服务端确认 :::BUSY:::
+		atomic.StoreInt32(&isBusy, 1)
 	}
-
-	fmt.Println("客户端退出")
+	fmt.Println("客户端已退出")
 }
