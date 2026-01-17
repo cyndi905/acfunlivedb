@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -52,7 +53,26 @@ var client = &fasthttp.Client{
 	ReadTimeout:         10 * time.Second,
 	WriteTimeout:        10 * time.Second,
 }
+
+// oldList 存储上一轮循环时正在直播的列表
 var oldList map[string]*live
+
+// suspectedDownList 存储从 oldList 中移除但未确认下播的直播间
+type suspectedDown struct {
+	live      *live
+	timestamp time.Time
+}
+
+// suspectedDownItem 用于序列化的结构
+type suspectedDownItem struct {
+	Live      live      `json:"live"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+var suspectedDownList = make(map[string]suspectedDown)
+var suspectedDownListMutex sync.RWMutex              // 保护 suspectedDownList 的并发访问
+var suspectedDownDBFile = "suspected_down_list.json" // 持久化文件名
+
 var (
 	liveListParserPool fastjson.ParserPool
 	liveCutParserPool  fastjson.ParserPool
@@ -222,6 +242,101 @@ func fetchLiveCut(uid int, liveID string) (num int, e error) {
 	return num, nil
 }
 
+// 从磁盘加载 suspectedDownList
+func loadSuspectedDownListFromDisk() error {
+	suspectedDownListMutex.Lock()
+	defer suspectedDownListMutex.Unlock()
+
+	file, err := os.Open(suspectedDownDBFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("打开持久化文件 %s 失败: %w", suspectedDownDBFile, err)
+	}
+	defer file.Close()
+
+	decoder := json.NewDecoder(file)
+	var items map[string]suspectedDownItem
+	err = decoder.Decode(&items)
+	if err != nil {
+		return fmt.Errorf("解码持久化文件 %s 失败: %w", suspectedDownDBFile, err)
+	}
+
+	// 将 items 转换回 suspectedDownList 结构
+	for id, item := range items {
+		l := livePool.Get().(*live)
+		*l = item.Live // 拷贝数据
+		suspectedDownList[id] = suspectedDown{
+			live:      l,
+			timestamp: item.Timestamp,
+		}
+	}
+	return nil
+}
+
+// 保存 suspectedDownList 到磁盘
+func saveSuspectedDownListToDisk() error {
+	suspectedDownListMutex.RLock()
+	defer suspectedDownListMutex.RUnlock()
+
+	items := make(map[string]suspectedDownItem, len(suspectedDownList))
+	for id, entry := range suspectedDownList {
+		items[id] = suspectedDownItem{
+			Live:      *(entry.live), // 拷贝数据
+			Timestamp: entry.timestamp,
+		}
+	}
+
+	file, err := os.CreateTemp(filepath.Dir(suspectedDownDBFile), "suspected_down_list_temp_*.json")
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	tempFileName := file.Name()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	err = encoder.Encode(items)
+	if err != nil {
+		file.Close()
+		os.Remove(tempFileName)
+		return fmt.Errorf("编码数据失败: %w", err)
+	}
+	err = file.Close()
+	if err != nil {
+		os.Remove(tempFileName)
+		return fmt.Errorf("关闭临时文件失败: %w", err)
+	}
+
+	// 原子性地移动临时文件到目标文件
+	err = os.Rename(tempFileName, suspectedDownDBFile)
+	if err != nil {
+		os.Remove(tempFileName)
+		return fmt.Errorf("重命名临时文件为 %s 失败: %w", suspectedDownDBFile, err)
+	}
+	return nil
+}
+
+// addSuspectedDown 将一个直播间添加到疑似下播列表，并立即保存到磁盘
+func addSuspectedDown(liveID string, sDown suspectedDown) {
+	suspectedDownListMutex.Lock()
+	defer suspectedDownListMutex.Unlock()
+	suspectedDownList[liveID] = sDown
+	if err := saveSuspectedDownListToDisk(); err != nil {
+		log.Printf("警告: 添加疑似下播记录后保存到磁盘失败: %v", err)
+	}
+}
+
+// removeSuspectedDown 从疑似下播列表中移除一个直播间，并立即保存到磁盘
+func removeSuspectedDown(liveID string) {
+	suspectedDownListMutex.Lock()
+	defer suspectedDownListMutex.Unlock()
+	delete(suspectedDownList, liveID)
+	if err := saveSuspectedDownListToDisk(); err != nil {
+		log.Printf("警告: 移除疑似下播记录后保存到磁盘失败: %v", err)
+	}
+}
+
 // 处理退出信号
 func quitSignal(cancel context.CancelFunc) {
 	ch := make(chan os.Signal, 1)
@@ -236,6 +351,12 @@ func quitSignal(cancel context.CancelFunc) {
 	signal.Reset(os.Interrupt, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
 	log.Println("正在退出本程序，请等待")
+	// 在退出前，确保将 suspectedDownList 保存到磁盘
+	if err := saveSuspectedDownListToDisk(); err != nil {
+		log.Printf("退出时保存疑似下播列表失败: %v", err)
+	} else {
+		log.Println("疑似下播列表已保存到磁盘")
+	}
 	cancel()
 }
 
@@ -250,6 +371,7 @@ func duration(dtime int64) string {
 	t := time.Unix(dtime/1e3, 0).UTC()
 	return fmt.Sprintf("%02d:%02d:%02d", t.Hour(), t.Minute(), t.Second())
 }
+
 func processCommand(ctx context.Context, commandLine string, output io.Writer) {
 	const helpMsg = `Commands:
 listall <uid>...     - 查询改uid的主包所有直播记录
@@ -839,6 +961,12 @@ func main() {
 	checkErr(err)
 	//deviceID, err = acfundanmu.GetDeviceID()
 	//checkErr(err)
+
+	// 在初始化其他组件后，加载疑似下播列表
+	if err := loadSuspectedDownListFromDisk(); err != nil {
+		log.Printf("加载疑似下播列表失败，将从空列表开始: %v", err)
+	}
+
 	// **根据模式启动不同的命令处理goroutine**
 	if *serviceMode {
 		go startSocketServer(childCtx) // 启动 Socket 服务器
@@ -869,6 +997,7 @@ Loop:
 				log.Println("没有人在直播")
 			}
 
+			// --- 1. 处理新增和更新 ---
 			for _, l := range newList {
 				if _, ok := oldList[l.liveID]; !ok {
 					// 新的liveID
@@ -899,39 +1028,112 @@ Loop:
 				}
 			}
 
+			// --- 2. 检查 suspectedDownList 中的直播间 ---
+			now := time.Now()
+			suspectedDownListMutex.Lock() // 在迭代和修改 suspectedDownList 前加锁
+			for liveID, item := range suspectedDownList {
+				// 检查是否超过设定的超时时间 (例如 5 分钟)
+				if now.Sub(item.timestamp) >= 5*time.Minute {
+					// 超时仍未在新列表中出现，再次确认是否下播
+					log.Printf("定期检查：直播间 %s (%s) 超时未在列表中出现，再次确认下播状态...", item.live.name, liveID)
+					if isLiveOnByPage(item.live.uid, item.live.liveID) == false {
+						// 确认下播
+						log.Printf("确认下播：直播间 %s (%s)", item.live.name, liveID)
+						go func(l *live) {
+							defer livePool.Put(l)
+							time.Sleep(10 * time.Second)
+							var summary *acfundanmu.Summary
+							var err error
+							err = runThrice(func() error {
+								// 需要确保 ac 对象在此处可用
+								summary, err = ac.GetSummary(l.liveID)
+								return err
+							})
+							if err != nil {
+								log.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
+								return
+							}
+							if summary.Duration == 0 {
+								log.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
+								return
+							}
+							insert(ctx, l)
+							updateLiveDuration(ctx, l.liveID, summary.Duration)
+						}(item.live)
+						// 从疑似列表中移除 - 使用封装函数
+						removeSuspectedDown(liveID)
+					} else {
+						// 仍然在线，刷新时间戳，继续等待
+						log.Printf("直播间 %s (%s) 仍在直播，刷新待检查时间", item.live.name, liveID)
+						item.timestamp = now
+						suspectedDownList[liveID] = item
+					}
+				}
+			}
+			suspectedDownListMutex.Unlock() // 释放锁
+
+			// --- 3. 处理可能下播的旧直播间 ---
 			for _, l := range oldList {
 				if _, ok := newList[l.liveID]; !ok {
-					// liveID对应的直播结束
-					go func(l *live) {
-						defer livePool.Put(l)
-						time.Sleep(10 * time.Second)
-						var summary *acfundanmu.Summary
-						var err error
-						err = runThrice(func() error {
-							summary, err = ac.GetSummary(l.liveID)
-							return err
-						})
-						if err != nil {
-							log.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
-							return
-						}
-						if summary.Duration == 0 {
-							log.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
-							return
-						}
-						insert(ctx, l)
-						updateLiveDuration(ctx, l.liveID, summary.Duration)
-					}(l)
-					// 有可能出现还在直播中但直播列表中没有的情况，需要再次确认是否下播
-					//if IsLiveOnByPage(l.uid) == false {
-					//}
+					// 在新列表中找不到，需要检查
+					isActuallyOffline := isLiveOnByPage(l.uid, l.liveID)
+					if !isActuallyOffline {
+						// 确认已下播
+						go func(l *live) {
+							defer livePool.Put(l)
+							time.Sleep(10 * time.Second)
+							var summary *acfundanmu.Summary
+							var err error
+							err = runThrice(func() error {
+								summary, err = ac.GetSummary(l.liveID)
+								return err
+							})
+							if err != nil {
+								log.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
+								return
+							}
+							if summary.Duration == 0 {
+								log.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
+								return
+							}
+							insert(ctx, l)
+							updateLiveDuration(ctx, l.liveID, summary.Duration)
+						}(l)
+					} else {
+						// isLiveOnByPage 返回 true，说明可能还在播，或者API不稳定返回了true
+						// 将其加入疑似下播列表 - 使用封装函数
+						addSuspectedDown(l.liveID, suspectedDown{l, time.Now()})
+						log.Printf("直播间 %s (%s) 暂时无法从列表获取但未确认下播，已加入待检查列表", l.name, l.liveID)
+					}
 				} else {
+					// 在新列表中找到，说明仍在播，回收旧的 live 对象
 					livePool.Put(l)
 				}
 			}
 
+			// --- 4. 更新 oldList ---
 			oldList = newList
+
 			time.Sleep(20 * time.Second)
 		}
 	}
+}
+
+// 判断该场直播是否还在直播中
+func isLiveOnByPage(uid int, liveId string) bool {
+	var ac *acfundanmu.AcFunLive
+	var err error
+	// 根据uid获取当前直播信息
+	ac, err = acfundanmu.NewAcFunLiveForCheck(acfundanmu.SetLiverUID(int64(uid)))
+	// 有错误表示已经下播
+	if err != nil {
+		return false
+	}
+	// 如果还在直播，看看是不是同一场直播
+	if ac != nil {
+		sInfo := ac.GetStreamInfo()
+		// 同一场则是还在直播
+		return liveId == sInfo.LiveID
+	}
+	return false
 }
