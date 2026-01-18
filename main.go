@@ -70,7 +70,6 @@ type suspectedDownItem struct {
 }
 
 var suspectedDownList = make(map[string]suspectedDown)
-var suspectedDownListMutex sync.RWMutex              // 保护 suspectedDownList 的并发访问
 var suspectedDownDBFile = "suspected_down_list.json" // 持久化文件名
 
 var (
@@ -248,8 +247,6 @@ func fetchLiveCut(uid int, liveID string) (num int, e error) {
 
 // 从磁盘加载 suspectedDownList
 func loadSuspectedDownListFromDisk() error {
-	suspectedDownListMutex.Lock()
-	defer suspectedDownListMutex.Unlock()
 
 	file, err := os.Open(suspectedDownDBFile)
 	if err != nil {
@@ -281,9 +278,6 @@ func loadSuspectedDownListFromDisk() error {
 
 // 保存 suspectedDownList 到磁盘
 func saveSuspectedDownListToDisk() error {
-	suspectedDownListMutex.RLock()
-	defer suspectedDownListMutex.RUnlock()
-
 	items := make(map[string]suspectedDownItem, len(suspectedDownList))
 	for id, entry := range suspectedDownList {
 		items[id] = suspectedDownItem{
@@ -323,8 +317,6 @@ func saveSuspectedDownListToDisk() error {
 
 // addSuspectedDown 将一个直播间添加到疑似下播列表，并立即保存到磁盘
 func addSuspectedDown(liveID string, sDown suspectedDown) {
-	suspectedDownListMutex.Lock()
-	defer suspectedDownListMutex.Unlock()
 	suspectedDownList[liveID] = sDown
 	if err := saveSuspectedDownListToDisk(); err != nil {
 		log.Printf("警告: 添加疑似下播记录后保存到磁盘失败: %v", err)
@@ -333,8 +325,6 @@ func addSuspectedDown(liveID string, sDown suspectedDown) {
 
 // removeSuspectedDown 从疑似下播列表中移除一个直播间，并立即保存到磁盘
 func removeSuspectedDown(liveID string) {
-	suspectedDownListMutex.Lock()
-	defer suspectedDownListMutex.Unlock()
 	delete(suspectedDownList, liveID)
 	if err := saveSuspectedDownListToDisk(); err != nil {
 		log.Printf("警告: 移除疑似下播记录后保存到磁盘失败: %v", err)
@@ -890,7 +880,6 @@ func main() {
 
 						// --- 2. 检查 suspectedDownList 中的直播间 ---
 						now := time.Now()
-						suspectedDownListMutex.Lock() // 在迭代和修改 suspectedDownList 前加锁
 						for liveID, item := range suspectedDownList {
 							// 检查是否超过设定的超时时间 (例如 5 分钟)
 							if now.Sub(item.timestamp) >= 5*time.Minute {
@@ -930,7 +919,6 @@ func main() {
 								}
 							}
 						}
-						suspectedDownListMutex.Unlock() // 释放锁
 
 						// --- 3. 处理可能下播的旧直播间 ---
 						for _, l := range oldList {
