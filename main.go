@@ -53,6 +53,10 @@ var client = &fasthttp.Client{
 	ReadTimeout:         10 * time.Second,
 	WriteTimeout:        10 * time.Second,
 }
+var (
+	stdLog   *log.Logger
+	errorLog *log.Logger
+)
 
 // oldList 存储上一轮循环时正在直播的列表
 var oldList map[string]*live
@@ -95,7 +99,7 @@ var livePool = &sync.Pool{
 // 检查错误
 func checkErr(err error) {
 	if err != nil {
-		log.Fatalf("遇到致命错误: %v", err)
+		errorLog.Fatalf("遇到致命错误: %v", err)
 	}
 }
 
@@ -104,7 +108,7 @@ func runThrice(f func() error) error {
 	var err error
 	for retry := 0; retry < 3; retry++ {
 		if err = f(); err != nil {
-			log.Printf("%v", err)
+			errorLog.Printf("%v", err)
 		} else {
 			return nil
 		}
@@ -319,7 +323,7 @@ func saveSuspectedDownListToDisk() error {
 func addSuspectedDown(liveID string, sDown suspectedDown) {
 	suspectedDownList[liveID] = sDown
 	if err := saveSuspectedDownListToDisk(); err != nil {
-		log.Printf("警告: 添加疑似下播记录后保存到磁盘失败: %v", err)
+		errorLog.Printf("警告: 添加疑似下播记录后保存到磁盘失败: %v", err)
 	}
 }
 
@@ -327,7 +331,7 @@ func addSuspectedDown(liveID string, sDown suspectedDown) {
 func removeSuspectedDown(liveID string) {
 	delete(suspectedDownList, liveID)
 	if err := saveSuspectedDownListToDisk(); err != nil {
-		log.Printf("警告: 移除疑似下播记录后保存到磁盘失败: %v", err)
+		errorLog.Printf("警告: 移除疑似下播记录后保存到磁盘失败: %v", err)
 	}
 }
 
@@ -344,13 +348,13 @@ func quitSignal(cancel context.CancelFunc) {
 	signal.Stop(ch)
 	signal.Reset(os.Interrupt, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
-	log.Println("正在退出本程序，请等待")
+	stdLog.Println("正在退出本程序，请等待")
 	if len(suspectedDownList) != 0 {
 		// 在退出前，确保将 suspectedDownList 保存到磁盘
 		if err := saveSuspectedDownListToDisk(); err != nil {
-			log.Printf("退出时保存疑似下播列表失败: %v", err)
+			errorLog.Printf("退出时保存疑似下播列表失败: %v", err)
 		} else {
-			log.Println("疑似下播列表已保存到磁盘")
+			stdLog.Println("疑似下播列表已保存到磁盘")
 		}
 	}
 	cancel()
@@ -570,7 +574,7 @@ func handleQuery(ctx context.Context, uid, count int, output io.Writer) {
 	err = rows.Err()
 	checkErr(err)
 	if !hasUID {
-		log.Printf("没有uid为 %d 的主播的记录", uid) // 日志
+		stdLog.Printf("没有uid为 %d 的主播的记录", uid) // 日志
 		_, err := fmt.Fprintf(output, "没有uid为 %d 的主播的记录\n", uid)
 		if err != nil {
 			return
@@ -592,7 +596,7 @@ func startInteractiveHandler(ctx context.Context) {
 			if !scanner.Scan() {
 				// 如果 Scan 失败，可能是 EOF 或错误
 				if err := scanner.Err(); err != nil {
-					log.Printf("Error reading from stdin: %v", err)
+					errorLog.Printf("Error reading from stdin: %v", err)
 				}
 				// 通常 EOF 意味着输入结束，可以考虑退出
 				quit <- struct{}{} // 发送退出信号
@@ -612,7 +616,7 @@ func handleSocketConnection(ctx context.Context, conn net.Conn) {
 		clientConnMutex.Lock()
 		hasClient = false // 释放连接占位
 		clientConnMutex.Unlock()
-		log.Printf("客户端断开连接")
+		stdLog.Printf("客户端断开连接")
 	}()
 
 	scanner := bufio.NewScanner(conn)
@@ -638,7 +642,7 @@ func startSocketServer(ctx context.Context) {
 	os.Remove(socketPath)
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		log.Fatalf("Listen error: %v", err)
+		errorLog.Fatalf("Listen error: %v", err)
 	}
 
 	go func() {
@@ -682,7 +686,7 @@ func getPlayback(liveID string) (playback *acfundanmu.Playback, err error) {
 			playback.URL = aliURL
 			playback.BackupURL = txURL
 		} else {
-			log.Printf("无法获取liveID为 %s 的阿里云录播链接或腾讯云录播链接", liveID)
+			stdLog.Printf("无法获取liveID为 %s 的阿里云录播链接或腾讯云录播链接", liveID)
 		}
 	}
 
@@ -748,12 +752,15 @@ func main() {
 	flag.Parse() // 解析命令行参数
 	logFile, err := os.OpenFile("error.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
-		log.Fatalf("无法打开日志文件: %v", err)
+		fmt.Fprintf(os.Stderr, "无法打开日志文件: %v\n", err)
+		os.Exit(1)
 	}
-	defer logFile.Close()
-	// 同时将日志输出到文件和控制台
-	multiWriter := io.MultiWriter(os.Stdout, logFile)
-	log.SetOutput(multiWriter)
+	// 用于输出普通信息日志
+	stdLog = log.New(os.Stdout, "INFO:", log.LstdFlags|log.Lshortfile)
+
+	// 创建错误日志器 (控制台 + 文件)
+	// 用于输出错误信息，这样错误既会显示在屏幕上，也会写进 error.log
+	errorLog = log.New(io.MultiWriter(os.Stdout, logFile), "ERROR: ", log.LstdFlags|log.Lshortfile)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -807,7 +814,7 @@ func main() {
 
 	// 在初始化其他组件后，加载疑似下播列表
 	if err := loadSuspectedDownListFromDisk(); err != nil {
-		log.Printf("加载疑似下播列表失败，将从空列表开始: %v", err)
+		errorLog.Printf("加载疑似下播列表失败，将从空列表开始: %v", err)
 	}
 
 	// **根据模式启动不同的命令处理goroutine**
@@ -819,7 +826,7 @@ func main() {
 
 	oldList = make(map[string]*live)
 	go func() {
-		log.Println("后台抓取启动")
+		stdLog.Println("后台抓取启动")
 		oldList = make(map[string]*live)
 		for {
 			select {
@@ -829,7 +836,7 @@ func main() {
 				for {
 					select {
 					case <-ctx.Done():
-						log.Println("收到退出信号，正在停止...")
+						stdLog.Println("收到退出信号，正在停止...")
 						return
 					default:
 						var newList map[string]*live
@@ -838,13 +845,13 @@ func main() {
 							return err
 						})
 						if err != nil {
-							log.Printf("获取直播间列表数据出现过多错误，跳过本次更新：%v", err)
+							stdLog.Printf("获取直播间列表数据出现过多错误，跳过本次更新：%v", err)
 							time.Sleep(10 * time.Second) // 错误时等待更长时间
 							continue                     // 跳过本次循环
 						}
 
 						if len(newList) == 0 {
-							log.Println("没有人在直播")
+							stdLog.Println("没有人在直播")
 						}
 
 						// --- 1. 处理新增和更新 ---
@@ -860,7 +867,7 @@ func main() {
 										return err
 									})
 									if err != nil {
-										log.Printf("获取uid为 %d 的主播的liveID为 %s 的直播剪辑编号失败，放弃获取", uid, liveID)
+										errorLog.Printf("获取uid为 %d 的主播的liveID为 %s 的直播剪辑编号失败，放弃获取", uid, liveID)
 										return
 									}
 									updateLiveCutNum(ctx, liveID, num)
@@ -884,10 +891,10 @@ func main() {
 							// 检查是否超过设定的超时时间 (例如 5 分钟)
 							if now.Sub(item.timestamp) >= 5*time.Minute {
 								// 超时仍未在新列表中出现，再次确认是否下播
-								log.Printf("定期检查：直播间 %s (%s) 超时未在列表中出现，再次确认下播状态...", item.live.name, liveID)
+								stdLog.Printf("定期检查：直播间 %s (%s) 超时未在列表中出现，再次确认下播状态...", item.live.name, liveID)
 								if isLiveOnByPage(item.live.uid, item.live.liveID) == false {
 									// 确认下播
-									log.Printf("确认下播：直播间 %s (%s)", item.live.name, liveID)
+									stdLog.Printf("确认下播：直播间 %s (%s)", item.live.name, liveID)
 									go func(l *live) {
 										defer livePool.Put(l)
 										time.Sleep(10 * time.Second)
@@ -899,11 +906,11 @@ func main() {
 											return err
 										})
 										if err != nil {
-											log.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
+											errorLog.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
 											return
 										}
 										if summary.Duration == 0 {
-											log.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
+											errorLog.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
 											return
 										}
 										insert(ctx, l)
@@ -913,7 +920,7 @@ func main() {
 									removeSuspectedDown(liveID)
 								} else {
 									// 仍然在线，刷新时间戳，继续等待
-									log.Printf("直播间 %s (%s) 仍在直播，刷新待检查时间", item.live.name, liveID)
+									stdLog.Printf("直播间 %s (%s) 仍在直播，刷新待检查时间", item.live.name, liveID)
 									item.timestamp = now
 									suspectedDownList[liveID] = item
 								}
@@ -937,11 +944,11 @@ func main() {
 											return err
 										})
 										if err != nil {
-											log.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
+											errorLog.Printf("获取 %s（%d） 的liveID为 %s 的直播总结出现错误，放弃获取", l.name, l.uid, l.liveID)
 											return
 										}
 										if summary.Duration == 0 {
-											log.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
+											errorLog.Printf("直播时长为0，无法获取 %s（%d） 的liveID为 %s 的直播时长", l.name, l.uid, l.liveID)
 											return
 										}
 										insert(ctx, l)
@@ -951,7 +958,7 @@ func main() {
 									// isLiveOnByPage 返回 true，说明可能还在播，或者API不稳定返回了true
 									// 将其加入疑似下播列表 - 使用封装函数
 									addSuspectedDown(l.liveID, suspectedDown{l, time.Now()})
-									log.Printf("直播间 %s (%s) 暂时无法从列表获取但未确认下播，已加入待检查列表", l.name, l.liveID)
+									stdLog.Printf("直播间 %s (%s) 暂时无法从列表获取但未确认下播，已加入待检查列表", l.name, l.liveID)
 								}
 							} else {
 								// 在新列表中找到，说明仍在播，回收旧的 live 对象
@@ -969,7 +976,7 @@ func main() {
 		}
 	}()
 	<-ctx.Done() // 这一行会阻塞主线程，直到 quit 信号触发 cancel()
-	log.Println("主程序退出")
+	stdLog.Println("主程序退出")
 }
 
 // 判断该场直播是否还在直播中
