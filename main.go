@@ -143,7 +143,19 @@ func fetchLiveList() (list map[string]*live, e error) {
 		req.Header.SetCookie("_did", ac.GetDeviceID())
 		req.Header.Set("Accept-Encoding", "gzip")
 		err := client.Do(req, resp)
-		checkErr(err)
+		if err != nil {
+			return nil, fmt.Errorf("HTTP 请求错误: %v", err)
+		}
+
+		// 新增的防御性检查
+		if resp.StatusCode() != 200 {
+			return nil, fmt.Errorf("HTTP 状态码错误: %d, 响应: %s", resp.StatusCode(), string(resp.Body()))
+		}
+
+		// 检查是否返回了 HTML (硬检查，防止 JSON 解析器报莫名其妙的错)
+		if strings.HasPrefix(string(resp.Body()), "<!DOCTYPE") || strings.Contains(string(resp.Body()), "<html") {
+			return nil, fmt.Errorf("服务器返回了 HTML 页面而非 JSON。响应内容: %s", string(resp.Body()))
+		}
 		var body []byte
 		if string(resp.Header.Peek("content-encoding")) == "gzip" || string(resp.Header.Peek("Content-Encoding")) == "gzip" {
 			body, err = resp.BodyGunzip()
